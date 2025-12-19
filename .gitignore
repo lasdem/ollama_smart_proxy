@@ -1,7 +1,8 @@
-.conda/
-__pycache__/
 *.pyc
+.DS_Store*.pyc
+.conda/
 .env
+.pytest_cache/
+__pycache__/
 db_data/
 logs/
-.DS_Store
