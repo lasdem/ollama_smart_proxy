@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 2.2 - Fixed priority calculation timing
+Version: 2.3 - Fixed priority calculation timing
 Date: 2025-12-19
 """
 import asyncio
@@ -38,7 +38,7 @@ PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5"))
 
 litellm.drop_params = True
-app = FastAPI(title="Ollama Smart Proxy", version="2.2")
+app = FastAPI(title="Ollama Smart Proxy", version="2.3")
 
 @dataclass
 class QueuedRequest:
@@ -202,6 +202,8 @@ async def queue_worker():
 
 async def process_request(request: QueuedRequest, priority_score: int):
     start_time = time.time()
+    model_was_loaded = tracker.is_model_loaded(request.model_name)
+    
     try:
         tracker.add_request(request.ip, request.model_name)
         
@@ -211,6 +213,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
         
         should_stream = request.body.get('stream', False)
         
+        # Start the request
         response = await acompletion(
             model=model,
             messages=request.body.get('messages'),
@@ -218,6 +221,15 @@ async def process_request(request: QueuedRequest, priority_score: int):
             api_base=OLLAMA_API_BASE,
             timeout=REQUEST_TIMEOUT
         )
+        
+        # If model wasn't loaded before, trigger immediate VRAM poll after brief delay
+        if not model_was_loaded:
+            async def delayed_poll():
+                await asyncio.sleep(1.0)
+                await vram_monitor.poll_now()
+                print(f"🔍 VRAM poll triggered for: {request.model_name}")
+            
+            asyncio.create_task(delayed_poll())
         
         request.future.set_result(response)
         stats["completed_requests"] += 1
@@ -230,7 +242,6 @@ async def process_request(request: QueuedRequest, priority_score: int):
         stats["failed_requests"] += 1
     finally:
         tracker.remove_request(request.ip, request.model_name)
-
 
 @app.on_event("startup")
 async def startup_event():

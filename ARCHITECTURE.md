@@ -170,9 +170,3 @@ POSTGRES_PASSWORD=<secure-password>
 LOG_LEVEL=INFO
 ```
 
-### Next Steps
-- [ ] Implement ModelVRAMTracker with cache loading
-- [ ] Update smart_proxy.py with enhanced priority logic
-- [ ] Add PostgreSQL logging
-- [ ] Add health/metrics endpoints
-- [ ] Create Docker deployment files

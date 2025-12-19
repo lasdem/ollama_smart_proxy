@@ -288,3 +288,10 @@ if __name__ == "__main__":
         monitor.stop()
     
     asyncio.run(test_monitor())
+
+    async def poll_now(self):
+        """Trigger immediate poll (called after starting a request)"""
+        try:
+            await self._poll_ollama_ps()
+        except Exception as e:
+            print(f"⚠️  On-demand VRAM poll failed: {e}")
