@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 2.1 - Self-contained with /api/ps monitoring
+Version: 2.2 - Fixed priority calculation timing
 Date: 2025-12-19
 """
 import asyncio
@@ -38,7 +38,7 @@ PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5"))
 
 litellm.drop_params = True
-app = FastAPI(title="Ollama Smart Proxy", version="2.1")
+app = FastAPI(title="Ollama Smart Proxy", version="2.2")
 
 @dataclass
 class QueuedRequest:
@@ -92,19 +92,29 @@ class RequestTracker:
         normalized = self._normalize_model_name(model_name)
         return normalized in self.vram_monitor.currently_loaded
     
-    def add_request(self, ip: str, model_name: str):
-        self.ip_active[ip] += 1
+    def mark_request_queued(self, ip: str):
+        """Mark request as queued (for IP tracking BEFORE processing)"""
         self.ip_history[ip].append(time.time())
+    
+    def add_request(self, ip: str, model_name: str):
+        """Mark request as actively processing"""
+        self.ip_active[ip] += 1
         self.active_request_count += 1
     
     def remove_request(self, ip: str, model_name: str):
+        """Mark request as completed"""
         if self.ip_active[ip] > 0:
             self.ip_active[ip] -= 1
         if self.active_request_count > 0:
             self.active_request_count -= 1
     
     def calculate_priority(self, request: QueuedRequest) -> int:
-        """Calculate priority score. LOWER = HIGHER priority"""
+        """
+        Calculate priority score. LOWER = HIGHER priority
+        
+        NOTE: This is called dynamically each time we check the queue,
+        so it reflects current state (loaded models, active IPs, wait time).
+        """
         score = 0
         model = request.model_name
         ip = request.ip
@@ -166,6 +176,7 @@ async def queue_worker():
                 await asyncio.sleep(0.05)
                 continue
             
+            # Recalculate priorities dynamically (reflects current VRAM state)
             priorities = [(tracker.calculate_priority(req), idx, req) 
                          for idx, req in enumerate(request_queue)]
             priorities.sort(key=lambda x: x[0])
@@ -173,12 +184,18 @@ async def queue_worker():
             request_queue.pop(idx)
             
             vram_info = ""
-            model_vram = tracker.get_vram_for_model(selected_request.model_name)
+            model_vram = tracker.get_vram_fected_request.model_name)
             if model_vram:
                 vram_info = f"VRAM: {model_vram/(1024*1024*1024):.1f}GB"
             
+            # Get current state for logging
+            is_loaded = tracker.is_model_loaded(selected_request.model_name)
+            ip_active = tracker.get_active_count(selected_request.ip)
+            wait_time = int(time.time() - selected_request.timestamp)
+            
             print(f"📤 Processing: {selected_request.model_name} from {selected_request.ip} "
-                  f"(priority={priority_score}, queue={len(request_queue)}, {vram_info})")
+                  f"(priority={priority_score}, queue={len(request_queue)}, {vram_info}, "
+                  f"loaded={is_loaded}, ip_active={ip_active}, wait={wait_time}s)")
         
         asyncio.create_task(process_request(selected_request, priority_score))
 
@@ -250,6 +267,9 @@ async def chat_completions(request: Request):
     client_ip = request.client.host
     should_stream = body.get('stream', False)
     
+    # Mark as queued for IP tracking BEFORE adding to queue
+    tracker.mark_request_queued(client_ip)
+    
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     
@@ -266,8 +286,9 @@ async def chat_completions(request: Request):
         request_queue.append(queued_request)
         stats["total_requests"] += 1
         stats["queue_depth_max"] = max(stats["queue_depth_max"], len(request_queue))
+        queue_depth = len(request_queue)
     
-    print(f"📥 Queued: {model_name} from {client_ip} (queue={len(request_queue)})")
+    print(f"📥 Queued: {model_name} from {client_ip} (total_in_queue={queue_depth})")
     
     try:
         response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
@@ -317,7 +338,9 @@ async def queue_status():
                 "ip": req.ip,
                 "wait_time_seconds": int(time.time() - req.timestamp),
                 "priority_score": priority,
-                "estimated_vram_gb": vram / (1024*1024*1024) if vram else None
+                "estimated_vram_gb": vram / (1024*1024*1024) if vram else None,
+                "is_loaded": tracker.is_model_loaded(req.model_name),
+                "ip_active_count": tracker.get_active_count(req.ip)
             })
         queue_items.sort(key=lambda x: x["priority_score"])
     
@@ -337,8 +360,8 @@ async def vram_status():
 async def root():
     return {
         "service": "Ollama Smart Proxy",
-        "version": "2.1",
-        "phase": "1 - VRAM-Aware Priority Queue (Self-contained)",
+        "version": "2.2",
+        "phase": "1 - VRAM-Aware Priority Queue (Fixed timing)",
         "endpoints": {
             "chat": "/v1/chat/completions",
             "health": "/health",
