@@ -155,7 +155,7 @@ class VRAMMonitor:
         # Try without tag (e.g., "gemma3" for "gemma3:latest")
         if ':' in model_name:
             base_name = model_name.split(':')[0]
-            for loaded_model in self.currentlyaded:
+            for loaded_model in self.currently_loaded:
                 if loaded_model.startswith(base_name + ':'):
                     return self.currently_loaded[loaded_model].size_vram
         
