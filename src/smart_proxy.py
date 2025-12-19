@@ -36,9 +36,8 @@ PRIORITY_BASE_SMALL_SWAP = int(os.getenv("PRIORITY_BASE_SMALL_SWAP", "300")) # S
 PRIORITY_BASE_LARGE_SWAP = int(os.getenv("PRIORITY_BASE_LARGE_SWAP", "500")) # Large model swap (>50GB)
 
 # Priority Modifiers (additive)
-PRIORITY_IP_ACTIVE_MULTIPLIER = int(os.getenv("PRIORITY_IP_ACTIVE_MULTIPLIER", "10"))  # +10 per active (lower priority)
 PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))  # -1 per sec (higher priority)
-PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per request (lower priority)
+PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per queued + recent (combined max 100)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
 litellm.drop_params = True
@@ -61,13 +60,14 @@ class QueuedRequest:
 class RequestTracker:
     def __init__(self, vram_monitor: VRAMMonitor):
         self.vram_monitor = vram_monitor
-        self.ip_active: Dict[str, int] = defaultdict(int)
-        self.ip_history: Dict[str, List[float]] = defaultdict(list)
+        self.ip_queued: Dict[str, int] = defaultdict(int)  # Requests queued per IP
+        self.ip_history: Dict[str, List[float]] = defaultdict(list)  # Request timestamps per IP
         self.active_request_count = 0
         self.recently_started_models: set = set()  # Models currently being processed
         
-    def get_active_count(self, ip: str) -> int:
-        return self.ip_active.get(ip, 0)
+    def get_queued_count(self, ip: str) -> int:
+        """Get number of requests currently queued from this IP"""
+        return self.ip_queued.get(ip, 0)
     
     def count_recent_requests(self, ip: str, window: int = 60) -> int:
         now = time.time()
@@ -112,6 +112,7 @@ class RequestTracker:
     def mark_request_queued(self, ip: str):
         """Mark request as queued (for IP tracking BEFORE processing)"""
         self.ip_history[ip].append(time.time())
+        self.ip_queued[ip] += 1  # Track queue depth per IP
     
     def cleanup_stale_models(self):
         """Remove models from recently_started that are not actually loaded"""
@@ -121,15 +122,14 @@ class RequestTracker:
     
     def add_request(self, ip: str, model_name: str):
         """Mark request as actively processing"""
-        self.ip_active[ip] += 1
+        if self.ip_queued[ip] > 0:
+            self.ip_queued[ip] -= 1  # Remove from queue count
         self.active_request_count += 1
         normalized = self._normalize_model_name(model_name)
         self.recently_started_models.add(normalized)
     
     def remove_request(self, ip: str, model_name: str):
         """Mark request as completed"""
-        if self.ip_active[ip] > 0:
-            self.ip_active[ip] -= 1
         if self.active_request_count > 0:
             self.active_request_count -= 1
         # Remove from recently_started after request completes
@@ -169,16 +169,17 @@ class RequestTracker:
             # Small/medium model requiring swap (MEDIUM COST)
             score = PRIORITY_BASE_SMALL_SWAP  # 300
         
-        # 2. IP Fairness Penalty (+10 per active = lower priority)
-        active_from_ip = self.get_active_count(ip)
-        score += active_from_ip * PRIORITY_IP_ACTIVE_MULTIPLIER
+        # 2. IP Fairness Penalty (queue + recent requests, combined max 100)
+        queued_from_ip = self.get_queued_count(ip)
+        recent_from_ip = self.count_recent_requests(ip, window=RATE_LIMIT_WINDOW)
+        
+        queue_penalty = queued_from_ip * PRIORITY_RATE_LIMIT_MULTIPLIER  # +5 each
+        rate_penalty = recent_from_ip * PRIORITY_RATE_LIMIT_MULTIPLIER   # +5 each
+        ip_penalty = min(queue_penalty + rate_penalty, 100)  # Combined cap at 100
+        score += ip_penalty
         
         # 3. Wait Time Bonus (-1 per second = higher priority, prevents starvation)
         score += int(wait_time) * PRIORITY_WAIT_TIME_MULTIPLIER
-        
-        # 4. Rate Limit Penalty (+5 per request = lower priority, anti-spam)
-        recent_count = self.count_recent_requests(ip, window=RATE_LIMIT_WINDOW)
-        score += min(recent_count * PRIORITY_RATE_LIMIT_MULTIPLIER, 100)
         
         # Never go below 0
         return max(0, score)
@@ -224,12 +225,13 @@ async def queue_worker():
             
             # Get current state for logging
             is_loaded = tracker.is_model_loaded(selected_request.model_name)
-            ip_active = tracker.get_active_count(selected_request.ip)
+            ip_queued = tracker.get_queued_count(selected_request.ip)
+            ip_recent = tracker.count_recent_requests(selected_request.ip, RATE_LIMIT_WINDOW)
             wait_time = int(time.time() - selected_request.timestamp)
             
             print(f"📤 Processing: {selected_request.model_name} from {selected_request.ip} "
                   f"(priority={priority_score}, queue={len(request_queue)}, {vram_info}, "
-                  f"loaded={is_loaded}, ip_active={ip_active}, wait={wait_time}s)")
+                  f"loaded={is_loaded}, ip_queued={ip_queued}, ip_recent={ip_recent}, wait={wait_time}s)")
             
             # Mark as actively processing BEFORE releasing lock
             # This ensures next priority calculation sees updated ip_active count
@@ -389,7 +391,8 @@ async def queue_status():
                 "priority_score": priority,
                 "estimated_vram_gb": vram / (1024*1024*1024) if vram else None,
                 "is_loaded": tracker.is_model_loaded(req.model_name),
-                "ip_active_count": tracker.get_active_count(req.ip)
+                "ip_queued_count": tracker.get_queued_count(req.ip),
+                "ip_recent_count": tracker.count_recent_requests(req.ip, RATE_LIMIT_WINDOW)
             })
         queue_items.sort(key=lambda x: x["priority_score"])
     

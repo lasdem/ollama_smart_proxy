@@ -6,16 +6,6 @@
 echo "🧪 Testing Ollama Smart Proxy v2.5 with 3 Large Models"
 echo "=================================================="
 echo ""
-echo "Models being tested:"
-echo "  - llama3.3:latest (70.6B, 75GB VRAM) - LARGE"
-echo "  - qwen2.5-coder:32b (32.8B, 53GB VRAM) - LARGE"  
-echo "  - mistral-small3.2:latest (24.0B, 44GB VRAM) - LARGE"
-echo ""
-echo "Test scenario: 30 requests total"
-echo "  - 10x llama3.3 (should bunch together)"
-echo "  - 10x qwen2.5-coder:32b (should bunch together)"
-echo "  - 10x mistral-small3.2 (should bunch together)"
-echo ""
 echo "Expected behavior:"
 echo "  1. First model to load gets processed first"
 echo "  2. Same-model requests bunch together"
@@ -23,14 +13,27 @@ echo "  3. Model swaps are expensive - other models wait"
 echo "  4. Large models (>50GB) get +300 penalty when swapping"
 echo "  5. IP active count increments correctly"
 echo ""
-read -p "Press Enter to start test (or Ctrl+C to cancel)..."
-echo ""
 
 # Clear any existing requests
 echo "🧹 Warming up proxy..."
-curl -s -X POST http://localhost:8003/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gemma3","messages":[{"role":"user","content":"warmup"}],"stream":false}' >/dev/null
+  curl -s -X POST http://localhost:8003/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"llama3.3","messages":[{"role":"user","content":"warmup llama3.3"}],"stream":false}' 
+  
+  curl -s -X POST http://localhost:8003/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"qwen3:32b","messages":[{"role":"user","content":"warmup qwen"}],"stream":false}' 
+
+  curl -s -X POST http://localhost:8003/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gpt-oss:120b","messages":[{"role":"user","content":"warmup gpt-oss:120b"}],"stream":false}' 
+
+sleep 2
+
+echo "Clearing ollama VRAM"
+ollama stop llama3.3
+ollama stop qwen3:32b
+ollama stop gpt-oss:120b
 
 sleep 2
 
@@ -39,20 +42,20 @@ echo ""
 
 # Send all requests in parallel
 for i in {1..10}; do
-  # 10x llama3.3 (70.6B)
+  # 10x llama3.3 
   curl -s -X POST http://localhost:8003/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{"model":"llama3.3","messages":[{"role":"user","content":"test llama3.3 #$i"}],"stream":false}" &
+    -d '{"model":"llama3.3","messages":[{"role":"user","content":"test llama3.3 #$i"}],"stream":false}' &
   
-  # 10x qwen2.5-coder:32b (32.8B)  
+  # 10x qwen3:32b 
   curl -s -X POST http://localhost:8003/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{"model":"qwen2.5-coder:32b","messages":[{"role":"user","content":"test qwen #$i"}],"stream":false}" &
-  
-  # 10x mistral-small3.2 (24.0B)
+    -d '{"model":"qwen3:32b","messages":[{"role":"user","content":"test qwen #$i"}],"stream":false}' &
+
+  # 10x gpt-oss:120b
   curl -s -X POST http://localhost:8003/v1/chat/completions \
     -H "Content-Type: application/json" \
-    -d "{"model":"mistral-small3.2","messages":[{"role":"user","content":"test mistral #$i"}],"stream":false}" &
+    -d '{"model":"gpt-oss:120b","messages":[{"role":"user","content":"test gpt-oss:120b #$i"}],"stream":false}' &
 done
 
 echo "📊 All 30 requests sent!"
