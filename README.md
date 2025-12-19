@@ -1,17 +1,21 @@
-# Ollama Smart Proxy - Phase 1 (v2.4)
+# Ollama Smart Proxy - Phase 1 (v3.1) ✅ COMPLETE
 
 ## 🎯 VRAM-Aware Priority Queue
 
 Smart request routing for Ollama with intelligent priority scheduling.
 
+**Status**: Production Ready | **Latest**: v3.1 | **Date**: 2025-12-19
+
 ### Features:
 - ✅ Real-time VRAM monitoring via `/api/ps`
-- ✅ Model affinity (reuse loaded models)
-- ✅ Parallel request detection
-- ✅ IP-based fairness
-- ✅ Anti-spam rate limiting (10 min window)
-- ✅ Wait time starvation prevention
+- ✅ Model affinity (reuse loaded models) - Priority 0
+- ✅ **Large model detection** - Models >50GB get +500 penalty
+- ✅ Model bunching - Same-model requests batched together
+- ✅ IP-based fairness - +10 penalty per concurrent request
+- ✅ Anti-spam rate limiting (10 min window) - +5 per request, max +100
+- ✅ Wait time starvation prevention - -1 per second waiting
 - ✅ Self-contained (no external dependencies)
+- ✅ **Intuitive scoring** - 0 = highest priority (process first)
 
 ## 🚀 Quick Start
 
@@ -58,19 +62,29 @@ curl -X POST http://localhost:8003/v1/chat/completions \
   }'
 ```
 
-## 📊 Priority Scoring
+## 📊 Priority Scoring (v3.0+)
 
-**Lower score = Higher priority**
+**0 = Highest priority** (process first)
 
-| Factor | Weight | Description |
-|--------|--------|-------------|
-| Same model loaded | **-200** | No swap needed - highest priority |
-| Can fit in parallel | **-50** | Good - no unload needed |
-| Small model swap | **+100** | Medium cost |
-| Large model swap (>50GB) | **+300** | Expensive - defer |
-| IP active requests | **+10 each** | Fairness penalty |
-| Wait time | **-1/sec** | Prevents starvation |
-| Request rate (10 min) | **+5 each** | Anti-spam (max +100) |
+| Factor | Score | Description |
+|--------|-------|-------------|
+| Same model loaded | **0** | No swap needed - HIGHEST priority |
+| Can fit in parallel | **150** | Good - no unload needed |
+| Small model swap (<50GB) | **300** | Medium cost |
+| Large model swap (>50GB) | **500** | Expensive - DEFER |
+| IP active requests | **+10 each** | Fairness penalty (lowers priority) |
+| Wait time | **-1/sec** | Prevents starvation (raises priority) |
+| Request rate (10 min) | **+5 each** | Anti-spam, max +100 (lowers priority) |
+
+**Example**: Large model (llama3.3 70GB), 2 concurrent from IP, 30s wait:
+```
+500 (large) + 20 (ip) - 30 (wait) + 25 (rate) = 515 (lower priority)
+```
+
+**Example**: Loaded model, first request:
+```
+0 (loaded) + 0 (ip) + 0 (wait) + 5 (rate) = 5 (HIGHEST priority!)
+```
 
 ## 📁 Project Structure
 
@@ -169,13 +183,24 @@ python tests/test_proxy.py
 
 ## 📊 Version
 
-**Current:** v2.4
-- Extended rate limit window to 10 minutes
-- On-demand VRAM polling after request start
+**Current:** v3.1 ✅ Production Ready
+- Fixed `can_fit_parallel()` bug (v3.1)
+- Intuitive priority scoring: 0 = highest (v3.0)
+- Large model detection working (>50GB gets +500)
+- Model bunching working (same-model requests batched)
 - IP fairness and rate limiting working
+- VRAM history tracking working
 - Self-contained (no external cache)
 
+**Latest Test Results**:
+```
+mistral (22GB):  priority=360  ← Processed FIRST
+gemma3 (6GB):    priority=370  ← Processed SECOND
+llama3.3 (70GB): priority=580  ← Processed LAST (large model deferred!)
+```
+
 See [docs/changelog/](docs/changelog/) for full version history.
+See [docs/PHASE1_SUMMARY.md](docs/PHASE1_SUMMARY.md) for complete details.
 
 ## 🔗 Related Projects
 

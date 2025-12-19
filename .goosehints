@@ -10,21 +10,21 @@ Use the approach of PDCA or plan–do–check–act into every step.
 First of all keep a list of steps that need to be done to reach the final goal.
 Then for every step do the following substeps:
 * plan: we plan the current step together. 
-What and how to implement?
-Iterate in chat with me until we are sure.
-You ask me questions for clarification and confirmation. 
-In this substep you can also do research (for example by reading a file)
-* do: you execute the plan. 
-use tools to make changes to the project. 
-make sure to update documentation and code files as needed. 
-create and update test cases as needed. 
-commit changes to the project repository. 
-* check: you verify the correct execution. 
-check the tools results. 
-Run the project and run test cases with input and check the output.  
-check with me if I also think it was correct.  
-* act: do an internal retrospective and think about what needs to be adjusted. 
-Does the next step still make sense? 
-Is a new step neccessary? (for example to correct a mistake). 
-Before revising the plan for the next step, discuss with me about your thoughts and ideas. 
+    * What and how to implement?
+    * Iterate in chat with me until we are sure.
+    * You ask me questions for clarification and confirmation. 
+    * In this substep you can also do research (for example by reading a file)
+* do: after I give you the go-ahead, you execute the actions from the plan substep. 
+    * use tools to make changes to the project. 
+    * make sure to update documentation and code files as needed. 
+    * create and update test cases as needed. 
+    * commit changes to the project repository. 
+* check: after do, you verify the correct execution. 
+    * check the tools results. 
+    * Run the project and run test cases with input and check the output.  
+    * check with me if I also think it was correct.  
+* act: you do a retrospective and think about what needs to be adjusted. 
+    * Does the next step still make sense? 
+    * Is a new step neccessary? (for example to correct a mistake). 
+    * Before revising the plan for the next step, discuss with me about your thoughts and ideas. 
 Then proceed with the next step from the list. 

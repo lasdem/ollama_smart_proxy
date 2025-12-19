@@ -239,7 +239,8 @@ class VRAMMonitor:
             True if model can fit, False otherwise
         """
         if not self.currently_loaded:
-            return True
+            # No models loaded - can't fit "in parallel" with nothing!
+            return False
         
         model_vram = self.get_vram_for_model(model_name)
         if model_vram is None:

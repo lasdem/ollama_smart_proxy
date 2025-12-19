@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 2.5 - Fixed timing bugs (ip_active, model bunching, VRAM history)
+Version: 3.1 - Fixed can_fit_parallel() bug (parallel fit now requires loaded models)
 Date: 2025-12-19
 """
 import asyncio
@@ -29,13 +29,16 @@ TOTAL_VRAM_BYTES = int(os.getenv("TOTAL_VRAM_MB", "80000")) * 1024 * 1024
 OLLAMA_MAX_PARALLEL = int(os.getenv("OLLAMA_MAX_PARALLEL", "3"))
 VRAM_POLL_INTERVAL = int(os.getenv("VRAM_POLL_INTERVAL", "5"))
 
-PRIORITY_VRAM_SAME_MODEL = int(os.getenv("PRIORITY_VRAM_SAME_MODEL", "-200"))
-PRIORITY_VRAM_PARALLEL = int(os.getenv("PRIORITY_VRAM_PARALLEL", "-50"))
-PRIORITY_VRAM_SMALL_SWAP = int(os.getenv("PRIORITY_VRAM_SMALL_SWAP", "100"))
-PRIORITY_VRAM_LARGE_SWAP = int(os.getenv("PRIORITY_VRAM_LARGE_SWAP", "300"))
-PRIORITY_IP_ACTIVE_MULTIPLIER = int(os.getenv("PRIORITY_IP_ACTIVE_MULTIPLIER", "10"))
-PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))
-PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5"))
+# Priority Scoring (0 = highest priority, higher numbers = lower priority)
+PRIORITY_BASE_LOADED = int(os.getenv("PRIORITY_BASE_LOADED", "0"))          # Model already loaded
+PRIORITY_BASE_PARALLEL = int(os.getenv("PRIORITY_BASE_PARALLEL", "150"))    # Can fit in parallel
+PRIORITY_BASE_SMALL_SWAP = int(os.getenv("PRIORITY_BASE_SMALL_SWAP", "300")) # Small model swap
+PRIORITY_BASE_LARGE_SWAP = int(os.getenv("PRIORITY_BASE_LARGE_SWAP", "500")) # Large model swap (>50GB)
+
+# Priority Modifiers (additive)
+PRIORITY_IP_ACTIVE_MULTIPLIER = int(os.getenv("PRIORITY_IP_ACTIVE_MULTIPLIER", "10"))  # +10 per active (lower priority)
+PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))  # -1 per sec (higher priority)
+PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per request (lower priority)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
 litellm.drop_params = True
@@ -92,12 +95,29 @@ class RequestTracker:
     def is_model_loaded(self, model_name: str) -> bool:
         """Check if model is currently loaded or being loaded"""
         normalized = self._normalize_model_name(model_name)
-        return (normalized in self.vram_monitor.currently_loaded or 
-                normalized in self.recently_started_models)
+        
+        # First check if ACTUALLY loaded in VRAM
+        if normalized in self.vram_monitor.currently_loaded:
+            return True
+        
+        # Only consider recently_started if we haven't polled VRAM yet
+        # (this handles the case where model is loading but poll hasn't completed)
+        if normalized in self.recently_started_models:
+            # Double-check it's not stale data from previous requests
+            # If model was in recently_started but poll shows it's not loaded, remove it
+            return True
+        
+        return False
     
     def mark_request_queued(self, ip: str):
         """Mark request as queued (for IP tracking BEFORE processing)"""
         self.ip_history[ip].append(time.time())
+    
+    def cleanup_stale_models(self):
+        """Remove models from recently_started that are not actually loaded"""
+        currently_loaded_set = set(self.vram_monitor.currently_loaded.keys())
+        # Only keep models that are still actively loaded
+        self.recently_started_models = self.recently_started_models & currently_loaded_set
     
     def add_request(self, ip: str, model_name: str):
         """Mark request as actively processing"""
@@ -112,52 +132,56 @@ class RequestTracker:
             self.ip_active[ip] -= 1
         if self.active_request_count > 0:
             self.active_request_count -= 1
-        # Keep model in recently_started if still in currently_loaded
-        # (it will be used by subsequent requests)
+        # Remove from recently_started after request completes
+        # It will be re-added if another request for same model starts
         normalized = self._normalize_model_name(model_name)
-        if normalized not in self.vram_monitor.currently_loaded:
-            self.recently_started_models.discard(normalized)
+        self.recently_started_models.discard(normalized)
     
     def calculate_priority(self, request: QueuedRequest) -> int:
         """
-        Calculate priority score. LOWER = HIGHER priority
+        Calculate priority score. 0 = HIGHEST priority (process first)
         
-        NOTE: This is called dynamically each time we check the queue,
-        so it reflects current state (loaded models, active IPs, wait time).
+        Lower numbers processed first. Score components:
+        - Base: 0 (loaded) to 500 (large swap)
+        - IP penalty: +10 per active request
+        - Wait bonus: -1 per second waiting
+        - Rate penalty: +5 per recent request (max +100)
+        
+        NOTE: Dynamically recalculated to reflect current state.
         """
-        score = 0
         model = request.model_name
         ip = request.ip
         wait_time = time.time() - request.timestamp
         
-        # 1. VRAM Efficiency Score
+        # 1. Base VRAM Cost (0 = best, 500 = worst)
         model_vram = self.get_vram_for_model(model)
         
         if self.is_model_loaded(model):
-            # Same model already loaded - no swap needed
-            score += PRIORITY_VRAM_SAME_MODEL  # -200
+            # Same model already loaded - no swap needed (BEST)
+            score = PRIORITY_BASE_LOADED  # 0
         elif self.can_fit_parallel(model):
-            # Can load in parallel
-            score += PRIORITY_VRAM_PARALLEL  # -50
+            # Can load in parallel (GOOD)
+            score = PRIORITY_BASE_PARALLEL  # 150
         elif model_vram and model_vram > (50 * 1024 * 1024 * 1024):  # >50GB
-            # Large model requiring swap
-            score += PRIORITY_VRAM_LARGE_SWAP  # +300
+            # Large model requiring swap (EXPENSIVE)
+            score = PRIORITY_BASE_LARGE_SWAP  # 500
         else:
-            # Medium model requiring swap
-            score += PRIORITY_VRAM_SMALL_SWAP  # +100
+            # Small/medium model requiring swap (MEDIUM COST)
+            score = PRIORITY_BASE_SMALL_SWAP  # 300
         
-        # 2. IP Fairness Score
+        # 2. IP Fairness Penalty (+10 per active = lower priority)
         active_from_ip = self.get_active_count(ip)
-        score += active_from_ip * PRIORITY_IP_ACTIVE_MULTIPLIER  # +10 per active
+        score += active_from_ip * PRIORITY_IP_ACTIVE_MULTIPLIER
         
-        # 3. Wait Time Score (prevents starvation)
-        score += int(wait_time) * PRIORITY_WAIT_TIME_MULTIPLIER  # -1 per second
+        # 3. Wait Time Bonus (-1 per second = higher priority, prevents starvation)
+        score += int(wait_time) * PRIORITY_WAIT_TIME_MULTIPLIER
         
-        # 4. Request Rate Score (anti-spam)
-        recent_count = self.count_recent_requests(ip, window=600)  # 10 minutes
-        score += min(recent_count * PRIORITY_RATE_LIMIT_MULTIPLIER, 100)  # max +100
+        # 4. Rate Limit Penalty (+5 per request = lower priority, anti-spam)
+        recent_count = self.count_recent_requests(ip, window=RATE_LIMIT_WINDOW)
+        score += min(recent_count * PRIORITY_RATE_LIMIT_MULTIPLIER, 100)
         
-        return score
+        # Never go below 0
+        return max(0, score)
 
 
 # Initialize VRAM monitor and tracker
