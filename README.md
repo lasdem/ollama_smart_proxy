@@ -1,17 +1,17 @@
-# Ollama Smart Proxy - Phase 1 (v2.1)
+# Ollama Smart Proxy - Phase 1 (v2.4)
 
-## 🎯 Self-Contained VRAM-Aware Priority Queue
+## 🎯 VRAM-Aware Priority Queue
 
-**NEW in v2.1:** No external dependencies! Uses Ollama's `/api/ps` endpoint for real-time VRAM monitoring.
+Smart request routing for Ollama with intelligent priority scheduling.
 
 ### Features:
 - ✅ Real-time VRAM monitoring via `/api/ps`
 - ✅ Model affinity (reuse loaded models)
 - ✅ Parallel request detection
 - ✅ IP-based fairness
-- ✅ Anti-spam rate limiting
+- ✅ Anti-spam rate limiting (10 min window)
 - ✅ Wait time starvation prevention
-- ✅ Self-contained (no external cache dependencies)
+- ✅ Self-contained (no external dependencies)
 
 ## 🚀 Quick Start
 
@@ -21,28 +21,32 @@ cd ~/ws/python/litellm_smart_proxy
 source .conda/bin/activate
 ```
 
-### 2. Run the proxy
+### 2. Configure (optional)
 ```bash
-# Set Ollama host (or create .env file)
-export OLLAMA_API_BASE=http://localhost:11434
-python smart_proxy_v2.py
+# Create .env from template
+cp .env.example .env
+# Edit with your settings
+nano .env
 ```
 
-Or use the run script:
+### 3. Run the proxy
 ```bash
 ./run_proxy.sh
 ```
 
-### 3. Test it
+Or manually:
 ```bash
-# Health check (includes VRAM stats)
+export OLLAMA_API_BASE=http://localhost:11434
+python src/smart_proxy.py
+```
+
+### 4. Test it
+```bash
+# Health check
 curl http://localhost:8003/health | jq
 
-# VRAM monitoring status
+# VRAM status
 curl http://localhost:8003/vram | jq
-
-# Queue status
-curl http://localhost:8003/queue | jq
 
 # Send a request
 curl -X POST http://localhost:8003/v1/chat/completions \
@@ -54,57 +58,6 @@ curl -X POST http://localhost:8003/v1/chat/completions \
   }'
 ```
 
-## 📡 VRAM Monitoring
-
-The proxy automatically polls `/api/ps` every 5 seconds to track:
-- Currently loaded models
-- Actual VRAM usage per model
-- Historical VRAM data for estimation
-
-### Example /api/ps response:
-```json
-{
-  "models": [
-    {
-      "model": "gemma3",
-      "size_vram": 5333539264,
-      "details": {
-        "parameter_size": "4.3B",
-        "quantization_level": "Q4_K_M"
-      },
-      "context_length": 4096
-    }
-  ]
-}
-```
-
-### VRAM Endpoint Output:
-```bash
-curl http://localhost:8003/vram
-```
-```json
-{
-  "loaded_models": 2,
-  "total_vram_used_mb": 18432.5,
-  "models": {
-    "gemma3": {
-      "vram_mb": 5085.2,
-      "params": "4.3B",
-      "quant": "Q4_K_M",
-      "context": 4096
-    },
-    "qwen2.5:7b": {
-      "vram_mb": 13347.3,
-      "params": "7.6B",
-      "quant": "Q4_K_M",
-      "context": 32768
-    }
-  },
-  "historical_models": 5,
-  "last_poll_seconds_ago": 2
-}
-```
-
 ## 📊 Priority Scoring
 
 **Lower score = Higher priority**
@@ -112,16 +65,42 @@ curl http://localhost:8003/vram
 | Factor | Weight | Description |
 |--------|--------|-------------|
 | Same model loaded | **-200** | No swap needed - highest priority |
-| Can fit in parallel | **-50*| Good - no unload needed |
-| Small model swap (<50GB) | **+100** | Medium cost |
-| Large model swap (>50GB) | **+300** | Expensive - defer if possible |
-| Active requests from IP | **+10 each** | Fairness penalty |
+| Can fit in parallel | **-50** | Good - no unload needed |
+| Small model swap | **+100** | Medium cost |
+| Large model swap (>50GB) | **+300** | Expensive - defer |
+| IP active requests | **+10 each** | Fairness penalty |
 | Wait time | **-1/sec** | Prevents starvation |
-| Request rate (60s window) | **+5 each** | Anti-spam (max +100) |
+| Request rate (10 min) | **+5 each** | Anti-spam (max +100) |
+
+## 📁 Project Structure
+
+```
+litellm_smart_proxy/
+├── README.md              # This file
+├── ARCHITECTURE.md        # Technical design
+├── requirements.txt       # Python dependencies
+├── .env.example          # Configuration template
+├── run_proxy.sh          # Start script
+│
+├── src/                  # Source code
+│   ├── smart_proxy.py    # Main application
+│   └── vram_monitor.py   # VRAM monitoring
+│
+├── scripts/              # Utility scripts
+│   └── test_model_names.sh
+│
+├── tests/                # Test files
+│   └── test_proxy.py
+│
+└── docs/                 # Documentation
+    ├── TESTING_GUIDE.md
+    ├── PHASE1_COMPLETE.md
+    └── changelog/        # Version history
+```
 
 ## 🔧 Configuration
 
-Environment variables (or `.env` file):
+Edit `.env` or set environment variables:
 
 ```bash
 # Ollama
@@ -129,13 +108,12 @@ OLLAMA_API_BASE=http://localhost:11434
 OLLAMA_MAX_PARALLEL=3
 
 # Proxy
-PROXY_HOST=0.0.0.0
 PROXY_PORT=8003
 REQUEST_TIMEOUT=300
 
 # VRAM
 TOTAL_VRAM_MB=80000
-VRAM_POLL_INTERVAL=5  # seconds
+VRAM_POLL_INTERVAL=5
 
 # Priority weights (tunable)
 PRIORITY_VRAM_SAME_MODEL=-200
@@ -145,6 +123,7 @@ PRIORITY_VRAM_LARGE_SWAP=300
 PRIORITY_IP_ACTIVE_MULTIPLIER=10
 PRIORITY_WAIT_TIME_MULTIPLIER=-1
 PRIORITY_RATE_LIMIT_MULTIPLIER=5
+RATE_LIMIT_WINDOW=600  # 10 minutes
 ```
 
 ## 📈 Endpoints
@@ -157,38 +136,52 @@ PRIORITY_RATE_LIMIT_MULTIPLIER=5
 
 ## 🧪 Testing
 
-See `PHASE1_COMPLETE.md` for detailed testing scenarios.
+See [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) for comprehensive testing scenarios.
 
 Quick test:
 ```bash
-python test_proxy.py
+python tests/test_proxy.py
 ```
 
-## 📝 Changes from v2.0
+## 📝 Documentation
 
-- ❌ Removed dependency on external VRAM cache
-- ✅ Added `vram_monitor.py` with `/api/ps` integration
-- ✅ Real-time VRAM tracking
-- ✅ Historical VRAM data for better estimates
-- ✅ New `/vram` endpoint
-- ✅ Improved priority calculation with actual VRAM data
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Technical design and data flow
+- [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) - Testing procedures
+- [docs/PHASE1_COMPLETE.md](docs/PHASE1_COMPLETE.md) - Phase 1 completion summary
+- [docs/changelog/](docs/changelog/) - Version history and fixes
 
 ## 🐛 Troubleshooting
 
-### VRAM monitor not updating
-- Check Ollama is accessible: `curl http://localhost:4/api/ps`
-- Check proxy logs for "🔍 Loaded:" messages
-- Verify `VRAM_POLL_INTERVAL` is set (default: 5s)
+### Proxy won't start
+- Check Ollama is accessible: `curl http://localhost:11434/api/tags`
+- Check port 8003 is free: `lsof -i :8003`
+- Check logs for errors
 
-### Priority scores seem off
-- Check `/vram` endpoint for current VRAM state
-- Use `/queue` to see calculated priorities
-- Models with no VRAM history default to conservative estimates
+### VRAM not detected
+- Wait 5-10 seconds after first request (poll interval)
+- Check `/vram` endpoint: `curl http://localhost:8003/vram | jq`
+- Verify Ollama `/api/ps` works: `curl http://localhost:11434/api/ps`
 
-## 🔗 Files
+### Priority scores seem wrong
+- Check `/queue` endpoint to see calculated priorities
+- Review [docs/changelog/MATH_EXPLANATION.md](docs/changelog/MATH_EXPLANATION.md)
+- Tune weights in `.env`
 
-- `smart_proxy_v2.py` - Main proxy (v2.1)
-- `vram_monitor.py` - VRAM monitoring via /api/ps
-- `test_proxy.py` - Test script
-- `ARCHITECTURE.md` - Design doc
-- `PHASE1_COMPLETE.md` - Detailed guide
+## 📊 Version
+
+**Current:** v2.4
+- Extended rate limit window to 10 minutes
+- On-demand VRAM polling after request start
+- IP fairness and rate limiting working
+- Self-contained (no external cache)
+
+See [docs/changelog/](docs/changelog/) for full version history.
+
+## 🔗 Related Projects
+
+- [Ollama](https://github.com/ollama/ollama) - The LLM runtime
+- [LiteLLM](https://github.com/BerriAI/litellm) - LLM proxy/gateway
+
+---
+
+**Phase 1: Complete** ✅

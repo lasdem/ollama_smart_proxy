@@ -2,7 +2,7 @@
 # Smart Proxy Run Script
 # Uses direct python path instead of conda activate
 
-cd ~/ws/python/litellm_smart_proxy
+cd "$(dirname "$0")"
 
 # Use the conda python directly (no activation needed)
 PYTHON_PATH="$PWD/.conda/bin/python"
@@ -18,5 +18,5 @@ echo "🔌 Port: $PROXY_PORT"
 echo "💾 VRAM: $TOTAL_VRAM_MB MB"
 echo ""
 
-# Run with direct python path
-exec "$PYTHON_PATH" smart_proxy_v2.py
+# Run with direct python path (updated to src/)
+exec "$PYTHON_PATH" src/smart_proxy.py

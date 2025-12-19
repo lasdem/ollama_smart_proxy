@@ -17,7 +17,7 @@ import litellm
 from litellm import acompletion
 from dotenv import load_dotenv
 
-from vram_monitor import VRAMMonitor
+from .vram_monitor import VRAMMonitor
 
 load_dotenv()
 
