@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 2.3 - Fixed priority calculation timing
+Version: 2.4 - Fixed priority calculation timing
 Date: 2025-12-19
 """
 import asyncio
@@ -36,9 +36,10 @@ PRIORITY_VRAM_LARGE_SWAP = int(os.getenv("PRIORITY_VRAM_LARGE_SWAP", "300"))
 PRIORITY_IP_ACTIVE_MULTIPLIER = int(os.getenv("PRIORITY_IP_ACTIVE_MULTIPLIER", "10"))
 PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5"))
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
 litellm.drop_params = True
-app = FastAPI(title="Ollama Smart Proxy", version="2.3")
+app = FastAPI(title="Ollama Smart Proxy", version="2.4")
 
 @dataclass
 class QueuedRequest:
@@ -144,7 +145,7 @@ class RequestTracker:
         score += int(wait_time) * PRIORITY_WAIT_TIME_MULTIPLIER  # -1 per second
         
         # 4. Request Rate Score (anti-spam)
-        recent_count = self.count_recent_requests(ip, window=60)
+        recent_count = self.count_recent_requests(ip, window=600)  # 10 minutes
         score += min(recent_count * PRIORITY_RATE_LIMIT_MULTIPLIER, 100)  # max +100
         
         return score
