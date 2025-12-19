@@ -5,7 +5,7 @@ No external dependencies - fully self-contained
 import asyncio
 import httpx
 import time
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -42,6 +42,9 @@ class VRAMMonitor:
         
         # Last successful poll time
         self.last_poll_time = 0
+        
+        # Track previous state to detect changes
+        self._previous_loaded_models: Set[str] = set()
         
         # Running flag
         self._running = False
@@ -85,6 +88,9 @@ class VRAMMonitor:
                 data = response.json()
                 models = data.get("models", [])
                 
+                # Get current model names
+                current_model_names = set()
+                
                 # Clear currently loaded
                 self.currently_loaded.clear()
                 
@@ -92,6 +98,7 @@ class VRAMMonitor:
                 for model_data in models:
                     model_name = model_data.get("model", "unknown")
                     size_vram = model_data.get("size_vram", 0)
+                    current_model_names.add(model_name)
                     
                     # Create ModelInfo
                     details = model_data.get("details", {})
@@ -116,10 +123,17 @@ class VRAMMonitor:
                 
                 self.last_poll_time = time.time()
                 
-                if models:
-                    total_vram_mb = sum(m.size_vram for m in self.currently_loaded.values()) / (1024 * 1024)
-                    model_names = ", ".join(self.currently_loaded.keys())
-                    print(f"🔍 Loaded: {model_names} | Total VRAM: {total_vram_mb:.1f} MB")
+                # Only log if state changed (models loaded/unloaded)
+                if current_model_names != self._previous_loaded_models:
+                    if models:
+                        total_vram_mb = sum(m.size_vram for m in self.currently_loaded.values()) / (1024 * 1024)
+                        model_names = ", ".join(self.currently_loaded.keys())
+                        print(f"🔍 Loaded: {model_names} | Total VRAM: {total_vram_mb:.1f} MB")
+                    elif self._previous_loaded_models:
+                        # Models were unloaded
+                        print(f"🔄 All models unloaded")
+                    
+                    self._previous_loaded_models = current_model_names
                 
         except Exception as e:
             print(f"❌ Failed to poll /api/ps: {e}")
