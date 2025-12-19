@@ -21,7 +21,7 @@ from vram_monitor import VRAMMonitor
 
 load_dotenv()
 
-OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8003"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
