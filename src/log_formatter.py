@@ -178,6 +178,17 @@ def setup_logging(level: str = "INFO"):
     app_formatter = StructuredFormatter(mode=LOG_FORMAT)
     uvicorn_formatter = UvicornAccessFormatter(mode=LOG_FORMAT)
     
+    # Configure root logger (uvicorn may use this)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    # Add our formatter
+    root_handler = logging.StreamHandler()
+    root_handler.setFormatter(uvicorn_formatter)
+    root_logger.addHandler(root_handler)
+    
     # Setup application logger
     app_logger = logging.getLogger("proxy")
     app_logger.setLevel(log_level)

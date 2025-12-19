@@ -504,14 +504,31 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     
-    # Configure uvicorn logging to use our formatters
-    log_config = uvicorn.config.LOGGING_CONFIG
-    log_config["formatters"]["default"]["fmt"] = "%(message)s"
-    log_config["formatters"]["access"]["fmt"] = "%(message)s"
+    # Use minimal logging config - our setup_logging() already configured everything
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {"format": "%(message)s"},
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+            "uvicorn.access": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+        },
+    }
     
     uvicorn.run(
         app, 
         host=PROXY_HOST, 
         port=PROXY_PORT,
-        log_config=log_config
+        log_config=log_config,
+        access_log=True
     )
