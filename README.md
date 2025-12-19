@@ -1,10 +1,10 @@
-# Ollama Smart Proxy - Phase 1 (v3.1) ✅ COMPLETE
+# Ollama Smart Proxy - Phase 1 (v3.2) ✅ COMPLETE
 
 ## 🎯 VRAM-Aware Priority Queue
 
 Smart request routing for Ollama with intelligent priority scheduling.
 
-**Status**: Production Ready | **Latest**: v3.1 | **Date**: 2025-12-19
+**Status**: Production Ready | **Latest**: v3.2 | **Date**: 2025-12-19
 
 ### Features:
 - ✅ Real-time VRAM monitoring via `/api/ps`
@@ -16,6 +16,9 @@ Smart request routing for Ollama with intelligent priority scheduling.
 - ✅ Wait time starvation prevention - -1 per second waiting
 - ✅ Self-contained (no external dependencies)
 - ✅ **Intuitive scoring** - 0 = highest priority (process first)
+- ✅ **Request ID tracking** - Unique IDs for request lifecycle monitoring
+- ✅ **Enhanced logging** - Distinct emojis for queue/processing/completion
+- ✅ **Automated testing** - Test runner with log analysis
 
 ## 🚀 Quick Start
 
@@ -86,6 +89,34 @@ curl -X POST http://localhost:8003/v1/chat/completions \
 0 (loaded) + 0 (ip) + 0 (wait) + 5 (rate) = 5 (HIGHEST priority!)
 ```
 
+## 🆔 Request ID Format (v3.2+)
+
+Each request gets a unique identifier:
+
+```
+REQ{counter:04d}_{full_ip}_{full_model}_{hash:4}
+```
+
+**Example**: `REQ0001_127.0.0.1_qwen2.5:7b_a3f2`
+
+- **counter**: Sequential number since server start (4 digits)
+- **full_ip**: Complete IP address
+- **full_model**: Complete model name including tag
+- **hash**: 4-character MD5 hash for uniqueness
+
+### Log Emojis:
+- 📨 **Queued**: Request added to queue
+- ⚡ **Processing**: Request being processed
+- ✅ **Completed**: Request finished successfully
+- ❌ **Error**: Request failed
+
+**Example log output**:
+```
+📨 Queued: [REQ0001_127.0.0.1_qwen2.5:7b_8ba7] qwen2.5:7b from 127.0.0.1 (queue_depth=1)
+⚡ Processing: [REQ0001_127.0.0.1_qwen2.5:7b_8ba7] qwen2.5:7b from 127.0.0.1 (priority=310, queue=0, loaded=False, wait=0s)
+✅ Completed: [REQ0001_127.0.0.1_qwen2.5:7b_8ba7] qwen2.5:7b in 15.50s
+```
+
 ## 📁 Project Structure
 
 ```
@@ -97,20 +128,62 @@ litellm_smart_proxy/
 ├── run_proxy.sh          # Start script
 │
 ├── src/                  # Source code
-│   ├── smart_proxy.py    # Main application
+│   ├── smart_proxy.py    # Main application (v3.2)
 │   └── vram_monitor.py   # VRAM monitoring
 │
 ├── scripts/              # Utility scripts
-│   └── test_model_names.sh
+│   ├── test_model_names.sh
+│   └── analyze_logs.py   # NEW: Log analyzer with statistics
 │
 ├── tests/                # Test files
-│   └── test_proxy.py
+│   ├── test_proxy.py
+│   ├── test_scenarios.py       # NEW: Test scenario definitions
+│   └── test_with_analysis.py  # NEW: Test runner with analysis
 │
 └── docs/                 # Documentation
     ├── TESTING_GUIDE.md
     ├── PHASE1_COMPLETE.md
     └── changelog/        # Version history
 ```
+
+## 🧪 Testing
+
+### Quick Test
+```bash
+python tests/test_proxy.py
+```
+
+### Full Test Suite with Analysis
+```bash
+python tests/test_with_analysis.py
+```
+
+This will:
+1. Start proxy in test mode
+2. Run all test scenarios (bunching, fairness, deferral)
+3. Analyze logs and show statistics
+4. Generate ASCII table with metrics
+
+### Manual Log Analysis
+```bash
+# Shell output (ASCII table)
+python scripts/analyze_logs.py proxy.log
+
+# JSON output
+python scripts/analyze_logs.py proxy.log json
+
+# Markdown output
+python scripts/analyze_logs.py proxy.log markdown
+```
+
+**Statistics included**:
+- Total requests, completed, failed
+- Per-model averages (wait time, processing time)
+- Priority score distribution
+- Model bunching efficiency
+- Queue depth metrics
+
+See [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) for comprehensive testing scenarios.
 
 ## 🔧 Configuration
 
@@ -130,11 +203,10 @@ TOTAL_VRAM_MB=80000
 VRAM_POLL_INTERVAL=5
 
 # Priority weights (tunable)
-PRIORITY_VRAM_SAME_MODEL=-200
-PRIORITY_VRAM_PARALLEL=-50
-PRIORITY_VRAM_SMALL_SWAP=100
-PRIORITY_VRAM_LARGE_SWAP=300
-PRIORITY_IP_ACTIVE_MULTIPLIER=10
+PRIORITY_BASE_LOADED=0
+PRIORITY_BASE_PARALLEL=150
+PRIORITY_BASE_SMALL_SWAP=300
+PRIORITY_BASE_LARGE_SWAP=500
 PRIORITY_WAIT_TIME_MULTIPLIER=-1
 PRIORITY_RATE_LIMIT_MULTIPLIER=5
 RATE_LIMIT_WINDOW=600  # 10 minutes
@@ -142,27 +214,11 @@ RATE_LIMIT_WINDOW=600  # 10 minutes
 
 ## 📈 Endpoints
 
-- **GET /** - Service info
+- **GET /** - Service info with version and features
 - **GET /health** - Health check + VRAM stats
 - **GET /vram** - Detailed VRAM monitoring
-- **GET /queue** - Real-time queue with priorities
+- **GET /queue** - Real-time queue with priorities and request IDs
 - **POST /v1/chat/completions** - OpenAI-compatible chat
-
-## 🧪 Testing
-
-See [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) for comprehensive testing scenarios.
-
-Quick test:
-```bash
-python tests/test_proxy.py
-```
-
-## 📝 Documentation
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Technical design and data flow
-- [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md) - Testing procedures
-- [docs/PHASE1_COMPLETE.md](docs/PHASE1_COMPLETE.md) - Phase 1 completion summary
-- [docs/changelog/](docs/changelog/) - Version history and fixes
 
 ## 🐛 Troubleshooting
 
@@ -183,24 +239,24 @@ python tests/test_proxy.py
 
 ## 📊 Version
 
-**Current:** v3.1 ✅ Production Ready
-- Fixed `can_fit_parallel()` bug (v3.1)
-- Intuitive priority scoring: 0 = highest (v3.0)
+**Current:** v3.2 ✅ Production Ready
+
+### v3.2 (2025-12-19)
+- ✅ Request ID tracking (REQ{num}_{ip}_{model}_{hash})
+- ✅ FastAPI lifespan (replaced deprecated on_event)
+- ✅ Enhanced logging with distinct emojis
+- ✅ Automated test suite with scenarios
+- ✅ Log analyzer with statistics tables
+- ✅ Shell/JSON/Markdown output formats
+
+### v3.1
+- Fixed `can_fit_parallel()` bug
 - Large model detection working (>50GB gets +500)
-- Model bunching working (same-model requests batched)
+- Model bunching working
 - IP fairness and rate limiting working
 - VRAM history tracking working
-- Self-contained (no external cache)
-
-**Latest Test Results**:
-```
-mistral (22GB):  priority=360  ← Processed FIRST
-gemma3 (6GB):    priority=370  ← Processed SECOND
-llama3.3 (70GB): priority=580  ← Processed LAST (large model deferred!)
-```
 
 See [docs/changelog/](docs/changelog/) for full version history.
-See [docs/PHASE1_SUMMARY.md](docs/PHASE1_SUMMARY.md) for complete details.
 
 ## 🔗 Related Projects
 
@@ -209,4 +265,4 @@ See [docs/PHASE1_SUMMARY.md](docs/PHASE1_SUMMARY.md) for complete details.
 
 ---
 
-**Phase 1: Complete** ✅
+**Phase 1: Complete** ✅ | **Next**: Phase 2 (PostgreSQL logging, metrics export)
