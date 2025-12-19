@@ -195,13 +195,22 @@ def setup_logging(level: str = "INFO"):
     uvicorn_handler.setFormatter(uvicorn_formatter)
     uvicorn_logger.addHandler(uvicorn_handler)
     
-    # Setup uvicorn error logger
+    # Setup uvicorn error logger (for startup messages and errors)
     uvicorn_error_logger = logging.getLogger("uvicorn.error")
     uvicorn_error_logger.setLevel(log_level)
     uvicorn_error_logger.propagate = False
     
     uvicorn_error_handler = logging.StreamHandler()
-    uvicorn_error_handler.setFormatter(app_formatter)
+    uvicorn_error_handler.setFormatter(uvicorn_formatter)
     uvicorn_error_logger.addHandler(uvicorn_error_handler)
+    
+    # Setup uvicorn main logger (catches startup messages)
+    uvicorn_main_logger = logging.getLogger("uvicorn")
+    uvicorn_main_logger.setLevel(log_level)
+    uvicorn_main_logger.propagate = False
+    
+    uvicorn_main_handler = logging.StreamHandler()
+    uvicorn_main_handler.setFormatter(uvicorn_formatter)
+    uvicorn_main_logger.addHandler(uvicorn_main_handler)
     
     return app_logger

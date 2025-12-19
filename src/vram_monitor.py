@@ -5,9 +5,13 @@ No external dependencies - fully self-contained
 import asyncio
 import httpx
 import time
+import logging
 from typing import Dict, Optional, List, Set
 from dataclasses import dataclass
 from collections import defaultdict
+
+# Get logger
+logger = logging.getLogger("proxy")
 
 
 @dataclass
@@ -55,7 +59,13 @@ class VRAMMonitor:
         if not self._running:
             self._running = True
             self._task = asyncio.create_task(self._monitor_loop())
-            print(f"📡 VRAM Monitor started (polling every {self.poll_interval}s)")
+            logger.info(
+                f"VRAM Monitor started (polling every {self.poll_interval}s)",
+                extra={
+                    "event": "vram_monitor_started",
+                    "poll_interval": self.poll_interval
+                }
+            )
     
     def stop(self):
         """Stop background monitoring"""
@@ -72,7 +82,10 @@ class VRAMMonitor:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"⚠️  VRAM Monitor error: {e}")
+                logger.warning(
+                    f"VRAM Monitor error: {e}",
+                    extra={"event": "vram_monitor_error", "error": str(e)}
+                )
                 await asyncio.sleep(self.poll_interval)
     
     async def _poll_ollama_ps(self):
@@ -82,7 +95,10 @@ class VRAMMonitor:
                 response = await client.get(f"{self.ollama_base_url}/api/ps")
                 
                 if response.status_code != 200:
-                    print(f"⚠️  /api/ps returned {response.status_code}")
+                    logger.warning(
+                        f"/api/ps returned {response.status_code}",
+                        extra={"event": "vram_poll_error", "status": response.status_code}
+                    )
                     return
                 
                 data = response.json()
@@ -128,15 +144,28 @@ class VRAMMonitor:
                     if models:
                         total_vram_mb = sum(m.size_vram for m in self.currently_loaded.values()) / (1024 * 1024)
                         model_names = ", ".join(self.currently_loaded.keys())
-                        print(f"🔍 Loaded: {model_names} | Total VRAM: {total_vram_mb:.1f} MB")
+                        logger.info(
+                            f"Loaded: {model_names}",
+                            extra={
+                                "event": "vram_loaded",
+                                "models": list(self.currently_loaded.keys()),
+                                "total_vram_mb": round(total_vram_mb, 1)
+                            }
+                        )
                     elif self._previous_loaded_models:
                         # Models were unloaded
-                        print(f"🔄 All models unloaded")
+                        logger.info(
+                            "All models unloaded",
+                            extra={"event": "vram_unloaded"}
+                        )
                     
                     self._previous_loaded_models = current_model_names
                 
         except Exception as e:
-            print(f"❌ Failed to poll /api/ps: {e}")
+            logger.error(
+                f"Failed to poll /api/ps: {e}",
+                extra={"event": "vram_poll_failed", "error": str(e)}
+            )
     
 
     async def poll_now(self):
@@ -144,7 +173,10 @@ class VRAMMonitor:
         try:
             await self._poll_ollama_ps()
         except Exception as e:
-            print(f"⚠️  On-demand VRAM poll failed: {e}")
+            logger.warning(
+                f"On-demand VRAM poll failed: {e}",
+                extra={"event": "vram_poll_failed", "error": str(e)}
+            )
 
     def get_vram_for_model(self, model_name: str) -> Optional[int]:
         """
@@ -276,38 +308,3 @@ class VRAMMonitor:
             "historical_models": len(self.vram_history),
             "last_poll_seconds_ago": int(time.time() - self.last_poll_time) if self.last_poll_time > 0 else None
         }
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    async def test_monitor():
-        # Test with local ollama
-        monitor = VRAMMonitor("http://localhost:11434", poll_interval=2)
-        monitor.start()
-        
-        # Let it poll a few times
-        await asyncio.sleep(10)
-        
-        # Check stats
-        stats = monitor.get_stats()
-        print(f"\nMonitor Stats: {stats}")
-        
-        # Test VRAM lookup
-        for model_name in monitor.get_currently_loaded_models():
-            vram = monitor.get_vram_for_model(model_name)
-            print(f"{model_name}: {vram / (1024*1024):.1f} MB VRAM")
-        
-        # Test estimation
-        estimated = monitor.estimate_vram_from_params("70.6B", "Q4_K_M", 131072)
-        print(f"\nEstimated 70B Q4_K_M @ 131K ctx: {estimated / (1024*1024*1024):.1f} GB")
-        
-        monitor.stop()
-    
-    asyncio.run(test_monitor())
-
-    async def poll_now(self):
-        """Trigger immediate poll (called after starting a request)"""
-        try:
-            await self._poll_ollama_ps()
-        except Exception as e:
-            print(f"⚠️  On-demand VRAM poll failed: {e}")

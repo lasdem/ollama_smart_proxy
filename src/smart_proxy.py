@@ -503,4 +503,15 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=PROXY_HOST, port=PROXY_PORT)
+    
+    # Configure uvicorn logging to use our formatters
+    log_config = uvicorn.config.LOGGING_CONFIG
+    log_config["formatters"]["default"]["fmt"] = "%(message)s"
+    log_config["formatters"]["access"]["fmt"] = "%(message)s"
+    
+    uvicorn.run(
+        app, 
+        host=PROXY_HOST, 
+        port=PROXY_PORT,
+        log_config=log_config
+    )
