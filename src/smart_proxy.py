@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 2.4 - Fixed priority calculation timing
+Version: 2.5 - Fixed timing bugs (ip_active, model bunching, VRAM history)
 Date: 2025-12-19
 """
 import asyncio
@@ -17,7 +17,7 @@ import litellm
 from litellm import acompletion
 from dotenv import load_dotenv
 
-from .vram_monitor import VRAMMonitor
+from vram_monitor import VRAMMonitor
 
 load_dotenv()
 
@@ -61,6 +61,7 @@ class RequestTracker:
         self.ip_active: Dict[str, int] = defaultdict(int)
         self.ip_history: Dict[str, List[float]] = defaultdict(list)
         self.active_request_count = 0
+        self.recently_started_models: set = set()  # Models currently being processed
         
     def get_active_count(self, ip: str) -> int:
         return self.ip_active.get(ip, 0)
@@ -89,9 +90,10 @@ class RequestTracker:
         return self.vram_monitor.can_fit_parallel(normalized, TOTAL_VRAM_BYTES)
     
     def is_model_loaded(self, model_name: str) -> bool:
-        """Check if model is currently loaded"""
+        """Check if model is currently loaded or being loaded"""
         normalized = self._normalize_model_name(model_name)
-        return normalized in self.vram_monitor.currently_loaded
+        return (normalized in self.vram_monitor.currently_loaded or 
+                normalized in self.recently_started_models)
     
     def mark_request_queued(self, ip: str):
         """Mark request as queued (for IP tracking BEFORE processing)"""
@@ -101,6 +103,8 @@ class RequestTracker:
         """Mark request as actively processing"""
         self.ip_active[ip] += 1
         self.active_request_count += 1
+        normalized = self._normalize_model_name(model_name)
+        self.recently_started_models.add(normalized)
     
     def remove_request(self, ip: str, model_name: str):
         """Mark request as completed"""
@@ -108,6 +112,11 @@ class RequestTracker:
             self.ip_active[ip] -= 1
         if self.active_request_count > 0:
             self.active_request_count -= 1
+        # Keep model in recently_started if still in currently_loaded
+        # (it will be used by subsequent requests)
+        normalized = self._normalize_model_name(model_name)
+        if normalized not in self.vram_monitor.currently_loaded:
+            self.recently_started_models.discard(normalized)
     
     def calculate_priority(self, request: QueuedRequest) -> int:
         """
@@ -197,6 +206,10 @@ async def queue_worker():
             print(f"📤 Processing: {selected_request.model_name} from {selected_request.ip} "
                   f"(priority={priority_score}, queue={len(request_queue)}, {vram_info}, "
                   f"loaded={is_loaded}, ip_active={ip_active}, wait={wait_time}s)")
+            
+            # Mark as actively processing BEFORE releasing lock
+            # This ensures next priority calculation sees updated ip_active count
+            tracker.add_request(selected_request.ip, selected_request.model_name)
         
         asyncio.create_task(process_request(selected_request, priority_score))
 
@@ -206,7 +219,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
     model_was_loaded = tracker.is_model_loaded(request.model_name)
     
     try:
-        tracker.add_request(request.ip, request.model_name)
+        # Note: tracker.add_request() already called in queue_worker (inside lock)
         
         model = request.model_name
         if not model.startswith("ollama/"):

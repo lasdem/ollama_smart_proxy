@@ -152,24 +152,31 @@ class VRAMMonitor:
         
         Returns:
             - Actual VRAM if model is currently loaded
-            - Average from history if we've seen it before
+            - Average from history if we've seen it before (BEFORE fuzzy matching!)
             - Estimated VRAM based on parameter size if available
             - None if no information available
         """
-        # Try exact match first
+        # 1. Try exact match for currently loaded
         if model_name in self.currently_loaded:
             return self.currently_loaded[model_name].size_vram
         
-        # Try without tag (e.g., "gemma3" for "gemma3:latest")
+        # 2. Check historical average FIRST (uses actual measured data)
+        if model_name in self.vram_history and self.vram_history[model_name]:
+            return int(sum(self.vram_history[model_name]) / len(self.vram_history[model_name]))
+        
+        # 3. Try fuzzy match for currently loaded (e.g., "gemma3" for "gemma3:latest")
         if ':' in model_name:
             base_name = model_name.split(':')[0]
             for loaded_model in self.currently_loaded:
                 if loaded_model.startswith(base_name + ':'):
                     return self.currently_loaded[loaded_model].size_vram
         
-        # Check historical average
-        if model_name in self.vram_history and self.vram_history[model_name]:
-            return int(sum(self.vram_history[model_name]) / len(self.vram_history[model_name]))
+        # 4. Try fuzzy match for history
+        if ':' in model_name:
+            base_name = model_name.split(':')[0]
+            for hist_model in self.vram_history:
+                if hist_model.startswith(base_name + ':') and self.vram_history[hist_model]:
+                    return int(sum(self.vram_history[hist_model]) / len(self.vram_history[hist_model]))
         
         # No data - will need to estimate or wait for first load
         return None
