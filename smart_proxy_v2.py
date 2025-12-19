@@ -184,7 +184,7 @@ async def queue_worker():
             request_queue.pop(idx)
             
             vram_info = ""
-            model_vram = tracker.get_vram_fected_request.model_name)
+            model_vram = tracker.get_vram_for_model(selected_request.model_name)
             if model_vram:
                 vram_info = f"VRAM: {model_vram/(1024*1024*1024):.1f}GB"
             
