@@ -11,6 +11,10 @@ import os
 import signal
 from pathlib import Path
 
+# Force JSON logging for tests
+os.environ['LOG_FORMAT'] = 'json'
+os.environ['LOG_LEVEL'] = 'INFO'
+
 # Test scenarios
 from test_scenarios import run_all_scenarios
 
@@ -28,15 +32,20 @@ class ProxyTestRunner:
         """Start proxy in subprocess"""
         proxy_path = Path(__file__).parent.parent / "src" / "smart_proxy.py"
         
-        print("🚀 Starting proxy for testing...")
+        print("🚀 Starting proxy for testing (JSON logging)...")
         
         # Start proxy with output to log file
+        env = os.environ.copy()
+        env['LOG_FORMAT'] = 'json'  # Ensure JSON format
+        env['LOG_LEVEL'] = 'INFO'
+        
         with open(self.log_file, 'w') as log:
             self.proxy_process = subprocess.Popen(
                 [sys.executable, str(proxy_path)],
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                cwd=proxy_path.parent
+                cwd=proxy_path.parent,
+                env=env
             )
         
         # Wait for startup
