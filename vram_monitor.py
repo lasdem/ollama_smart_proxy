@@ -148,9 +148,16 @@ class VRAMMonitor:
             - Estimated VRAM based on parameter size if available
             - None if no information available
         """
-        # Check if currently loaded
+        # Try exact match first
         if model_name in self.currently_loaded:
             return self.currently_loaded[model_name].size_vram
+        
+        # Try without tag (e.g., "gemma3" for "gemma3:latest")
+        if ':' in model_name:
+            base_name = model_name.split(':')[0]
+            for loaded_model in self.currentlyaded:
+                if loaded_model.startswith(base_name + ':'):
+                    return self.currently_loaded[loaded_model].size_vram
         
         # Check historical average
         if model_name in self.vram_history and self.vram_history[model_name]:

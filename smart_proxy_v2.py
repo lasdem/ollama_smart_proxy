@@ -71,17 +71,26 @@ class RequestTracker:
         self.ip_history[ip] = [t for t in self.ip_history[ip] if now - t < window]
         return len(self.ip_history[ip])
     
+    def _normalize_model_name(self, model_name: str) -> str:
+        """Normalize model name to match Ollama format (add :latest if no tag)"""
+        if ':' not in model_name:
+            return f"{model_name}:latest"
+        return model_name
+    
     def get_vram_for_model(self, model_name: str) -> Optional[int]:
         """Get VRAM requirement from monitor (returns bytes)"""
-        return self.vram_monitor.get_vram_for_model(model_name)
+        normalized = self._normalize_model_name(model_name)
+        return self.vram_monitor.get_vram_for_model(normalized)
     
     def can_fit_parallel(self, model_name: str) -> bool:
         """Check if model can fit alongside currently loaded models"""
-        return self.vram_monitor.can_fit_parallel(model_name, TOTAL_VRAM_BYTES)
+        normalized = self._normalize_model_name(model_name)
+        return self.vram_monitor.can_fit_parallel(normalized, TOTAL_VRAM_BYTES)
     
     def is_model_loaded(self, model_name: str) -> bool:
         """Check if model is currently loaded"""
-        return model_name in self.vram_monitor.currently_loaded
+        normalized = self._normalize_model_name(model_name)
+        return normalized in self.vram_monitor.currently_loaded
     
     def add_request(self, ip: str, model_name: str):
         self.ip_active[ip] += 1
