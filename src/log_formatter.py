@@ -111,7 +111,7 @@ class UvicornAccessFormatter(logging.Formatter):
         self.mode = mode
     
     def format(self, record: logging.LogRecord) -> str:
-        """Format uvicorn alog."""
+        """Format uvicorn log."""
         if self.mode == "json":
             return self._format_json(record)
         else:
@@ -120,9 +120,8 @@ class UvicornAccessFormatter(logging.Formatter):
     def _format_json(self, record: logging.LogRecord) -> str:
         """Format as JSON."""
         # Parse uvicorn message: "client - method path status"
-        # Example: "127.0.0.1:39886 - GET /queue HTTP/1.1 200"
+        # Example: "127.0.0.1:39886 - "GET /queue HTTP/1.1" 200"
         message = record.getMessage()
-        parts = message.split()
         
         log_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -131,13 +130,16 @@ class UvicornAccessFormatter(logging.Formatter):
         }
         
         # Try to parse structured fields
-        try:
-            if len(parts) >= 5:
-                log_data["client"] = parts[0]
-                log_data["method"] = parts[2]
-                log_data["path"] = parts[3]
-                log_data["status"] = int(parts[5]) if len(parts) > 5 else None
-        except (IndexError, ValueError):
+        # Pattern: IP:PORT - "METHOD PATH PROTOCOL" STATUS
+        import re
+        match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
+        
+        if match:
+            log_data["client"] = match.group(1)
+            log_data["method"] = match.group(2)
+            log_data["path"] = match.group(3)
+            log_data["status"] = int(match.group(4))
+        else:
             # Fallback to raw message
             log_data["message"] = message
         
@@ -149,16 +151,15 @@ class UvicornAccessFormatter(logging.Formatter):
         message = record.getMessage()
         
         # Parse and reformat
-        parts = message.split()
-        try:
-            if len(parts) >= 5:
-                client = parts[0]
-                method = parts[2]
-                path = parts[3]
-                status = parts[5] if len(parts) > 5 else "???"
-                return f"[uvicorn] {timestamp} | {client} | {method} {path} | {status}"
-        except IndexError:
-            pass
+        import re
+        match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
+        
+        if match:
+            client = match.group(1)
+            method = match.group(2)
+            path = match.group(3)
+            status = match.group(4)
+            return f"[uvicorn] {timestamp} | {client} | {method} {path} | {status}"
         
         # Fallback
         return f"[uvicorn] {timestamp} | {message}"
