@@ -1,5 +1,9 @@
 # Known Issues - Logging v3.3
 
+## 0. CRITICAL requests are not longer processed since latest logging changes!
+## 0.1. CRITICAL LOGGING in JSON is still broken for litellm and uvicorn, maybe just deactivate those logs?
+
+
 ## 1. Exception Tracebacks Show in Plain Text
 
 **Issue**: When an exception occurs in the application, the traceback is displayed in plain text format even when `LOG_FORMAT=json`.
