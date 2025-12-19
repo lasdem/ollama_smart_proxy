@@ -1,5 +1,26 @@
-fastapi
-uvicorn
-litellm
-asyncpg 
-psycopg2-binary
+# Core FastAPI + ASGI
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.5
+python-multipart==0.0.20
+
+# LiteLLM for multi-provider support
+litellm==1.80.10
+
+# HTTP client
+httpx==0.28.1
+
+# PostgreSQL async support
+asyncpg==0.31.0
+sqlalchemy[asyncio]==2.0.36
+
+# Environment management
+python-dotenv==1.0.1
+
+# Monitoring (optional but recommended)
+prometheus-client==0.21.1
+
+# Testing (dev)
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx-sse==0.4.0
