@@ -138,6 +138,14 @@ class VRAMMonitor:
         except Exception as e:
             print(f"❌ Failed to poll /api/ps: {e}")
     
+
+    async def poll_now(self):
+        """Trigger immediate poll (called after starting a request)"""
+        try:
+            await self._poll_ollama_ps()
+        except Exception as e:
+            print(f"⚠️  On-demand VRAM poll failed: {e}")
+
     def get_vram_for_model(self, model_name: str) -> Optional[int]:
         """
         Get VRAM requirement for a model in bytes.
