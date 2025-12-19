@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 3.2 - Request IDs, Lifespan, Enhanced Logging
+Version: 3.3 - Structured JSON/Human Logging
 Date: 2025-12-19
 """
 import asyncio
@@ -21,8 +21,13 @@ from litellm import acompletion
 from dotenv import load_dotenv
 
 from vram_monitor import VRAMMonitor
+from log_formatter import setup_logging
 
 load_dotenv()
+
+# Setup logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+logger = setup_logging(LOG_LEVEL)
 
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")
@@ -220,7 +225,7 @@ stats = {
 
 
 async def queue_worker():
-    print("🚀 Queue worker started")
+    logger.info("Queue worker started", extra={"event": "proxy_startup"})
     while True:
         if tracker.active_request_count >= OLLAMA_MAX_PARALLEL:
             await asyncio.sleep(0.1)
@@ -249,9 +254,22 @@ async def queue_worker():
             ip_recent = tracker.count_recent_requests(selected_request.ip, RATE_LIMIT_WINDOW)
             wait_time = int(time.time() - selected_request.timestamp)
             
-            print(f"⚡ Processing: [{selected_request.request_id}] {selected_request.model_name} from {selected_request.ip} "
-                  f"(priority={priority_score}, queue={len(request_queue)}, {vram_info}, "
-                  f"loaded={is_loaded}, ip_queued={ip_queued}, ip_recent={ip_recent}, wait={wait_time}s)")
+            logger.info(
+                f"[{selected_request.request_id}]",
+                extra={
+                    "event": "request_processing",
+                    "request_id": selected_request.request_id,
+                    "ip": selected_request.ip,
+                    "model": selected_request.model_name,
+                    "priority": priority_score,
+                    "queue_depth": len(request_queue),
+                    "vram_gb": model_vram/(1024*1024*1024) if model_vram else None,
+                    "loaded": is_loaded,
+                    "ip_queued": ip_queued,
+                    "ip_recent": ip_recent,
+                    "wait_seconds": wait_time
+                }
+            )
             
             # Mark as actively processing BEFORE releasing lock
             # This ensures next priority calculation sees updated ip_active count
@@ -287,17 +305,42 @@ async def process_request(request: QueuedRequest, priority_score: int):
             async def delayed_poll():
                 await asyncio.sleep(1.0)
                 await vram_monitor.poll_now()
-                print(f"🔍 VRAM poll triggered for: {request.model_name}")
+                logger.info(
+                    f"[{request.request_id}]",
+                    extra={
+                        "event": "vram_poll",
+                        "request_id": request.request_id,
+                        "model": request.model_name
+                    }
+                )
             
             asyncio.create_task(delayed_poll())
         
         request.future.set_result(response)
         stats["completed_requests"] += 1
         duration = time.time() - start_time
-        print(f"✅ Completed: [{request.request_id}] {request.model_name} in {duration:.2f}s")
+        logger.info(
+            f"[{request.request_id}]",
+            extra={
+                "event": "request_completed",
+                "request_id": request.request_id,
+                "ip": request.ip,
+                "model": request.model_name,
+                "duration_seconds": round(duration, 2)
+            }
+        )
         
     except Exception as e:
-        print(f"❌ Error: [{request.request_id}] {request.model_name}: {e}")
+        logger.error(
+            f"[{request.request_id}]",
+            extra={
+                "event": "request_failed",
+                "request_id": request.request_id,
+                "ip": request.ip,
+                "model": request.model_name,
+                "error": str(e)
+            }
+        )
         request.future.set_exception(e)
         stats["failed_requests"] += 1
     finally:
@@ -310,16 +353,23 @@ async def lifespan(app: FastAPI):
     vram_monitor.start()
     asyncio.create_task(queue_worker())
     
-    print(f"🎯 Smart Proxy started on {PROXY_HOST}:{PROXY_PORT}")
-    print(f"🔧 Max parallel: {OLLAMA_MAX_PARALLEL}")
-    print(f"💾 Total VRAM: {TOTAL_VRAM_BYTES/(1024*1024*1024):.1f} GB")
-    print(f"📡 VRAM monitoring via /api/ps every {VRAM_POLL_INTERVAL}s")
+    logger.info(
+        f"Smart Proxy started on {PROXY_HOST}:{PROXY_PORT}",
+        extra={
+            "event": "proxy_startup",
+            "host": PROXY_HOST,
+            "port": PROXY_PORT,
+            "max_parallel": OLLAMA_MAX_PARALLEL,
+            "total_vram_gb": round(TOTAL_VRAM_BYTES/(1024*1024*1024), 1),
+            "vram_poll_interval": VRAM_POLL_INTERVAL
+        }
+    )
     
     yield
     
     # Shutdown
     vram_monitor.stop()
-    print("👋 Smart Proxy shut down")
+    logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 
 
 app = FastAPI(title="Ollama Smart Proxy", version="3.2", lifespan=lifespan)
@@ -365,7 +415,16 @@ async def chat_completions(request: Request):
         stats["queue_depth_max"] = max(stats["queue_depth_max"], len(request_queue))
         queue_depth = len(request_queue)
     
-    print(f"📨 Queued: [{req_id}] {model_name} from {client_ip} (queue_depth={queue_depth})")
+    logger.info(
+        f"[{req_id}]",
+        extra={
+            "event": "request_queued",
+            "request_id": req_id,
+            "ip": client_ip,
+            "model": model_name,
+            "queue_depth": queue_depth
+        }
+    )
     
     try:
         response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
