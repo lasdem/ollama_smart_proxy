@@ -34,9 +34,10 @@ class LogAnalyzer:
         
     def parse_log(self):
         """Parse log file and extract events"""
-        # Regex patterns
+        # Regex patterns - updated to handle empty VRAM field
         queued_pattern = r'📨 Queued: \[(REQ\d+_[^\]]+)\] (\S+) from (\S+) \(queue_depth=(\d+)\)'
-        processing_pattern = r'⚡ Processing: \[(REQ\d+_[^\]]+)\] (\S+) from (\S+) \(priority=(\d+), queue=(\d+), (?:VRAM: ([\d.]+)GB, )?loaded=(\w+), ip_queued=(\d+), ip_recent=(\d+), wait=(\d+)s\)'
+        # Processing pattern now handles: "priority=X, queue=Y, , loaded=Z" or "priority=X, queue=Y, VRAM: X.XGB, loaded=Z"
+        processing_pattern = r'⚡ Processing: \[(REQ\d+_[^\]]+)\] (\S+) from (\S+) \(priority=(\d+), queue=(\d+), (?:VRAM: ([\d.]+)GB, |, )?loaded=(\w+), ip_queued=(\d+), ip_recent=(\d+), wait=(\d+)s\)'
         completed_pattern = r'✅ Completed: \[(REQ\d+_[^\]]+)\] (\S+) in ([\d.]+)s'
         error_pattern = r'❌ Error: \[(REQ\d+_[^\]]+)\] (\S+): (.+)'
         
@@ -201,24 +202,26 @@ class LogAnalyzer:
         print(f"Max Queue Depth:    {stats['max_queue_depth']}")
         
         # Per-model stats
-        print("\n" + "-"*80)
-        print("📈 PER-MODEL STATISTICS")
-        print("-"*80)
-        print(f"{'Model':<25} {'Count':>8} {'Avg Wait (s)':>15} {'Avg Process (s)':>18}")
-        print("-"*80)
-        
-        for model, data in sorted(stats['by_model'].items()):
-            print(f"{model:<25} {data['count']:>8} {data['avg_wait_time']:>15.2f} {data['avg_processing_time']:>18.2f}")
+        if stats['by_model']:
+            print("\n" + "-"*80)
+            print("📈 PER-MODEL STATISTICS")
+            print("-"*80)
+            print(f"{'Model':<25} {'Count':>8} {'Avg Wait (s)':>15} {'Avg Process (s)':>18}")
+            print("-"*80)
+            
+            for model, data in sorted(stats['by_model'].items()):
+                print(f"{model:<25} {data['count']:>8} {data['avg_wait_time']:>15.2f} {data['avg_processing_time']:>18.2f}")
         
         # Priority distribution
-        print("\n" + "-"*80)
-        print("🎯 PRIORITY DISTRIBUTION")
-        print("-"*80)
-        print(f"{'Priority Range':<20} {'Count':>10}")
-        print("-"*80)
-        
-        for priority, count in sorted(stats['priority_distribution'].items()):
-            print(f"{priority}-{priority+99:<20} {count:>10}")
+        if stats['priority_distribution']:
+            print("\n" + "-"*80)
+            print("🎯 PRIORITY DISTRIBUTION")
+            print("-"*80)
+            print(f"{'Priority Range':<20} {'Count':>10}")
+            print("-"*80)
+            
+            for priority, count in sorted(stats['priority_distribution'].items()):
+                print(f"{priority}-{priority+99:<20} {count:>10}")
         
         # Model bunching
         if stats['model_bunching']:
@@ -239,7 +242,7 @@ class LogAnalyzer:
     
     def format_json_output(self, stats: Dict[str, Any]) -> str:
         """Format statistics as JSON"""
-        # Convert defaultdicts to regular dicts for JSON serialization
+        # Convert defdicts to regular dicts for JSON serialization
         json_stats = {
             'total_requests': stats['total_requests'],
             'completed': stats['completed'],
@@ -262,19 +265,21 @@ class LogAnalyzer:
         md.append(f"- **Failed**: {stats['failed']} ❌")
         md.append(f"- **Max Queue Depth**: {stats['max_queue_depth']}\n")
         
-        md.append("## Per-Model Statistics\n")
-        md.append("| Model | Count | Avg Wait (s) | Avg Process (s) |")
-        md.append("|-------|-------|--------------|-----------------|")
+        if stats['by_model']:
+            md.append("## Per-Model Statistics\n")
+            md.append("| Model | Count | Avg Wait (s) | Avg Process (s) |")
+            md.append("|-------|-------|--------------|-----------------|")
+            
+            for model, data in sorted(stats['by_model'].items()):
+                md.append(f"| {model} | {data['count']} | {data['avg_wait_time']:.2f} | {data['avg_processing_time']:.2f} |")
         
-        for model, data in sorted(stats['by_model'].items()):
-            md.append(f"| {model} | {data['count']} | {data['avg_wait_time']:.2f} | {data['avg_processing_time']:.2f} |")
-        
-        md.append("\n## Priority Distribution\n")
-        md.append("| Priority Range | Count |")
-        md.append("|----------------|-------|")
-        
-        for priority, count in sorted(stats['priority_distribution'].items()):
-            md.append(f"| {priority}-{priority+99} | {count} |")
+        if stats['priority_distribution']:
+            md.append("\n## Priority Distribution\n")
+            md.append("| Priority Range | Count |")
+            md.append("|----------------|-------|")
+            
+            for priority, count in sorted(stats['priority_distribution'].items()):
+                md.append(f"| {priority}-{priority+99} | {count} |")
         
         if stats['model_bunching']:
             md.append("\n## Model Bunching\n")
