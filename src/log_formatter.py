@@ -2,17 +2,20 @@
 Structured logging formatter with JSON and human-readable modes.
 Supports Grafana/Loki integration with configurable output formats.
 
-Date: 2025-12-19
+Date: 2026-01-19 (Fixed traceback support)
 """
 import os
 import json
 import logging
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 
 # Environment variables
-LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()  # json|human (default: json)
+# We read this inside the formatter to support runtime reloading in tests
+def get_log_mode():
+    return os.getenv("LOG_FORMAT", "json").lower()
 
 
 # Emoji mapping for human-readable mode
@@ -31,9 +34,14 @@ EVENT_EMOJIS = {
 class StructuredFormatter(logging.Formatter):
     """Custom formatter supporting JSON and human-readable modes."""
     
-    def __init__(self, mode: str = "json"):
+    def __init__(self, mode: str = None):
         super().__init__()
-        self.mode = mode
+        # If mode not provided, defer to env var (useful for testing reload)
+        self._mode = mode
+    
+    @property
+    def mode(self):
+        return self._mode or get_log_mode()
     
     def format(self, record: logging.LogRecord) -> str:
         """Format log record based on mode."""
@@ -43,62 +51,51 @@ class StructuredFormatter(logging.Formatter):
             return self._format_human(record)
     
     def _format_json(self, record: logging.LogRecord) -> str:
-        """Format as single-line JSON for Loki/Grafana.
-
-        The formatter attempts to serialise all custom fields from the log record.
-        If serialisation fails (e.g. due to non‑JSON‑serialisable objects), the
-        formatter falls back to a plain string representation of the message.
-        """
+        """Format as single-line JSON for Loki/Grafana."""
+        
+        # 1. Base Fields
         log_data: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "logger": record.name,
             "level": record.levelname,
         }
 
-        # Add message if present
+        # 2. Message
         if record.getMessage():
             log_data["message"] = record.getMessage()
 
-        # Add all extra fields from logger.info("event", extra={...})
+        # 3. Extra Fields (logger.info(..., extra={...}))
         if hasattr(record, "event"):
             log_data["event"] = record.event
 
-        # Add all custom fields
+        # 4. Exception / Traceback Support (CRITICAL FIX)
+        if record.exc_info:
+            # Format the exception traceback as a string
+            log_data["exc_info"] = "".join(traceback.format_exception(*record.exc_info))
+        elif record.stack_info:
+            log_data["stack_info"] = self.formatStack(record.stack_info)
+
+        # 5. Add all other custom attributes from extra={}
+        # We filter out standard LogRecord attributes
+        standard_attrs = {
+            "name", "msg", "args", "created", "filename", "funcName",
+            "levelname", "levelno", "lineno", "module", "msecs",
+            "message", "pathname", "process", "processName",
+            "relativeCreated", "thread", "threadName", "exc_info",
+            "exc_text", "stack_info", "event"
+        }
+        
         for key, value in record.__dict__.items():
-            if key not in [
-                "name",
-                "msg",
-                "args",
-                "created",
-                "filename",
-                "funcName",
-                "levelname",
-                "levelno",
-                "lineno",
-                "module",
-                "msecs",
-                "message",
-                "pathname",
-                "process",
-                "processName",
-                "relativeCreated",
-                "thread",
-                "threadName",
-                "exc_info",
-                "exc_text",
-                "stack_info",
-                "event",
-            ]:
+            if key not in standard_attrs:
                 log_data[key] = value
 
+        # 6. Serialize
         try:
-            try:
-                return json.dumps(log_data)
-            except Exception:
-                return record.getMessage()
+            return json.dumps(log_data, default=str)
         except Exception:
-            # Fallback to a simple string representation
-            return record.getMessage()
+            # Fallback if something is not serializable
+            log_data["message"] = f"JSON Serialization Error: {record.getMessage()}"
+            return json.dumps({k: str(v) for k, v in log_data.items()})
     
     def _format_human(self, record: logging.LogRecord) -> str:
         """Format as human-readable with emojis."""
@@ -110,36 +107,48 @@ class StructuredFormatter(logging.Formatter):
         if hasattr(record, "event"):
             emoji = EVENT_EMOJIS.get(record.event, "") + " "
         
-        # Build message from extra fields
+        # Build message parts
         message_parts = []
-        
-        # Start with the base message if present
         if record.getMessage():
             message_parts.append(record.getMessage())
+            
+        # Add exceptions if present (CRITICAL FIX)
+        if record.exc_info:
+             # Just append the exception type and message for brevity in human logs,
+             # or full trace if preferred.
+             exc_class, exc_msg, _ = record.exc_info
+             message_parts.append(f"\nExample: {exc_class.__name__}: {exc_msg}")
         
-        # Add extra fields as key=value pairs
+        # Add extra fields
+        standard_attrs = {
+            "name", "msg", "args", "created", "filename", "funcName",
+            "levelname", "levelno", "lineno", "module", "msecs",
+            "message", "pathname", "process", "processName",
+            "relativeCreated", "thread", "threadName", "exc_info",
+            "exc_text", "stack_info", "event"
+        }
+
         for key, value in record.__dict__.items():
-            if key not in ["name", "msg", "args", "created", "filename", "funcName",
-                          "levelname", "levelno", "lineno", "module", "msecs",
-                          "message", "pathname", "process", "processName",
-                          "relativeCreated", "thread", "threadName", "exc_info",
-                          "exc_text", "stack_info", "event"]:
+            if key not in standard_attrs:
                 if isinstance(value, float):
                     message_parts.append(f"{key}={value:.2f}")
                 else:
                     message_parts.append(f"{key}={value}")
         
         message = " ".join(message_parts)
-        
         return f"[{logger_name}] {timestamp} | {emoji}{message}"
 
 
 class UvicornAccessFormatter(logging.Formatter):
     """Custom formatter for uvicorn access logs."""
     
-    def __init__(self, mode: str = "json"):
+    def __init__(self, mode: str = None):
         super().__init__()
-        self.mode = mode
+        self._mode = mode
+    
+    @property
+    def mode(self):
+        return self._mode or get_log_mode()
     
     def format(self, record: logging.LogRecord) -> str:
         """Format uvicorn log."""
@@ -150,8 +159,6 @@ class UvicornAccessFormatter(logging.Formatter):
     
     def _format_json(self, record: logging.LogRecord) -> str:
         """Format as JSON."""
-        # Parse uvicorn message: "client - method path status"
-        # Example: "127.0.0.1:39886 - "GET /queue HTTP/1.1" 200"
         message = record.getMessage()
         
         log_data = {
@@ -160,8 +167,7 @@ class UvicornAccessFormatter(logging.Formatter):
             "level": record.levelname,
         }
         
-        # Try to parse structured fields
-        # Pattern: IP:PORT - "METHOD PATH PROTOCOL" STATUS
+        # Regex to parse uvicorn's standard access log format
         import re
         match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
         
@@ -171,20 +177,15 @@ class UvicornAccessFormatter(logging.Formatter):
             log_data["path"] = match.group(3)
             log_data["status"] = int(match.group(4))
         else:
-            # Fallback to raw message
             log_data["message"] = message
         
-        try:
-            return json.dumps(log_data)
-        except Exception:
-            return record.getMessage()
+        return json.dumps(log_data)
     
     def _format_human(self, record: logging.LogRecord) -> str:
         """Format as human-readable."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = record.getMessage()
         
-        # Parse and reformat
         import re
         match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
         
@@ -195,58 +196,68 @@ class UvicornAccessFormatter(logging.Formatter):
             status = match.group(4)
             return f"[uvicorn] {timestamp} | {client} | {method} {path} | {status}"
         
-        # Fallback
         return f"[uvicorn] {timestamp} | {message}"
 
 
 def setup_logging(level: str = "INFO"):
     """
     Setup logging with structured formatters.
-    
-    Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR)
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
     
-    # Create formatters
-    app_formatter = StructuredFormatter(mode=LOG_FORMAT)
-    uvicorn_formatter = UvicornAccessFormatter(mode=LOG_FORMAT)
+    # Create Root Handler
+    # We attach the formatter HERE so it applies to everything bubbling up
+    root_formatter = StructuredFormatter()
+    root_handler = logging.StreamHandler()
+    root_handler.setFormatter(root_formatter)
     
-    # Configure root logger (uvicorn may use this)
+    # Configure Root Logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    # Remove existing handlers
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
-    # Add our formatter - use app_formatter for root to ensure consistency
-    root_handler = logging.StreamHandler()
-    root_handler.setFormatter(app_formatter)
+    
+    # Nuke existing handlers to prevent duplication/legacy formats
+    if root_logger.handlers:
+        for h in root_logger.handlers[:]:
+            root_logger.removeHandler(h)
+            
     root_logger.addHandler(root_handler)
     
-    # Setup uvicorn error logger (for startup messages and errors)
-    uvicorn_error_logger = logging.getLogger("uvicorn.error")
-    uvicorn_error_logger.setLevel(log_level)
-    uvicorn_error_logger.propagate = True  # Allow propagation to root
+    # --- Configure Specific Loggers ---
     
-    # Setup uvicorn main logger (catches startup messages)
-    uvicorn_main_logger = logging.getLogger("uvicorn")
-    uvicorn_main_logger.setLevel(log_level)
-    uvicorn_main_logger.propagate = True  # Allow propagation to root
-    
-    # Setup uvicorn access logger
-    uvicorn_access_logger = logging.getLogger("uvicorn.access")
-    uvicorn_access_logger.setLevel(log_level)
-    uvicorn_access_logger.propagate = True  # Allow propagation to root
-    
-    # Setup litellm loggers - allow them to propagate
-    for logger_name in ["litellm", "litellm.proxy", "litellm.auth", "litellm.usage", "litellm.cache", "litellm.telemetry"]:
-        logger = logging.getLogger(logger_name)
-        logger.setLevel(log_level)
-        logger.propagate = True  # Allow propagation to root
-    
-    # Create app logger
+    # Uvicorn Access (needs special parsing logic)
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.setLevel(log_level)
+    # We clear handlers and ADD a specific one, preventing propagation to avoid double logging
+    # (One structured, one raw from root)
+    if uvicorn_access.handlers:
+         for h in uvicorn_access.handlers[:]:
+            uvicorn_access.removeHandler(h)
+            
+    uvicorn_handler = logging.StreamHandler()
+    uvicorn_handler.setFormatter(UvicornAccessFormatter())
+    uvicorn_access.addHandler(uvicorn_handler)
+    uvicorn_access.propagate = False # STOP it from going to root (which uses generic formatter)
+
+    # Other Uvicorn loggers (error, main) -> Propagate to Root (Generic JSON)
+    for name in ["uvicorn", "uvicorn.error"]:
+        l = logging.getLogger(name)
+        l.setLevel(log_level)
+        l.propagate = True
+        # Ensure they don't have their own handlers
+        for h in l.handlers[:]:
+            l.removeHandler(h)
+
+    # LiteLLM -> Propagate to Root
+    for name in ["litellm", "litellm.proxy", "litellm.auth", "litellm.usage", "litellm.cache", "litellm.telemetry"]:
+        l = logging.getLogger(name)
+        l.setLevel(log_level)
+        l.propagate = True
+        for h in l.handlers[:]:
+            l.removeHandler(h)
+
+    # App Logger
     app_logger = logging.getLogger("smart_proxy")
     app_logger.setLevel(log_level)
-    app_logger.propagate = True  # Allow propagation to root
+    app_logger.propagate = True
     
     return app_logger
