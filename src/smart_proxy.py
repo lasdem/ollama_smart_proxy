@@ -23,6 +23,9 @@ from dotenv import load_dotenv
 from vram_monitor import VRAMMonitor
 from log_formatter import setup_logging
 
+import httpx
+from starlette.background import BackgroundTask
+
 load_dotenv()
 
 # Setup logging
@@ -88,7 +91,7 @@ class RequestTracker:
         self.ip_queued: Dict[str, int] = defaultdict(int)  # Requests queued per IP
         self.ip_history: Dict[str, List[float]] = defaultdict(list)  # Request timestamps per IP
         self.active_request_count = 0
-        self.recently_started_models: set = set()  # Models currently being processed
+        self.recently_started_models = ""
         
     def get_queued_count(self, ip: str) -> int:
         """Get number of requests currently queued from this IP"""
@@ -127,7 +130,7 @@ class RequestTracker:
         
         # Only consider recently_started if we haven't polled VRAM yet
         # (this handles the case where model is loading but poll hasn't completed)
-        if normalized in self.recently_started_models:
+        if normalized == self.recently_started_models:
             # Double-check it's not stale data from previous requests
             # If model was in recently_started but poll shows it's not loaded, remove it
             return True
@@ -143,7 +146,7 @@ class RequestTracker:
         """Remove models from recently_started that are not actually loaded"""
         currently_loaded_set = set(self.vram_monitor.currently_loaded.keys())
         # Only keep models that are still actively loaded
-        self.recently_started_models = self.recently_started_models & currently_loaded_set
+        self.recently_started_models = currently_loaded_set
     
     def add_request(self, ip: str, model_name: str):
         """Mark request as actively processing"""
@@ -151,16 +154,12 @@ class RequestTracker:
             self.ip_queued[ip] -= 1  # Remove from queue count
         self.active_request_count += 1
         normalized = self._normalize_model_name(model_name)
-        self.recently_started_models.add(normalized)
+        self.recently_started_models = normalized
     
     def remove_request(self, ip: str, model_name: str):
         """Mark request as completed"""
         if self.active_request_count > 0:
             self.active_request_count -= 1
-        # Remove from recently_started after request completes
-        # It will be re-added if another request for same model starts
-        normalized = self._normalize_model_name(model_name)
-        self.recently_started_models.discard(normalized)
     
     def calculate_priority(self, request: QueuedRequest) -> int:
         """
@@ -215,6 +214,7 @@ class RequestTracker:
 vram_monitor = VRAMMonitor(OLLAMA_API_BASE, VRAM_POLL_INTERVAL)
 tracker = RequestTracker(vram_monitor)
 request_queue: List[QueuedRequest] = []
+active_requests: Dict[str, QueuedRequest] = {} 
 queue_lock = asyncio.Lock()
 stats = {
     "total_requests": 0,
@@ -236,55 +236,35 @@ async def queue_worker():
                 await asyncio.sleep(0.05)
                 continue
             
-            # Recalculate priorities dynamically (reflects current VRAM state)
+            # Recalculate priorities
             priorities = [(tracker.calculate_priority(req), idx, req) 
                          for idx, req in enumerate(request_queue)]
             priorities.sort(key=lambda x: x[0])
             priority_score, idx, selected_request = priorities[0]
+            
+            # Remove from waiting queue
             request_queue.pop(idx)
             
+            # --- ADD THIS: Track as active ---
+            active_requests[selected_request.request_id] = selected_request
+            # -------------------------------
+            
             vram_info = ""
-            model_vram = tracker.get_vram_for_model(selected_request.model_name)
-            if model_vram:
-                vram_info = f"VRAM: {model_vram/(1024*1024*1024):.1f}GB"
+            # ... (rest of the logging logic) ...
             
-            # Get current state for logging
-            is_loaded = tracker.is_model_loaded(selected_request.model_name)
-            ip_queued = tracker.get_queued_count(selected_request.ip)
-            ip_recent = tracker.count_recent_requests(selected_request.ip, RATE_LIMIT_WINDOW)
-            wait_time = int(time.time() - selected_request.timestamp)
-            
-            logger.info(
-                f"[{selected_request.request_id}]",
-                extra={
-                    "event": "request_processing",
-                    "request_id": selected_request.request_id,
-                    "ip": selected_request.ip,
-                    "model": selected_request.model_name,
-                    "priority": priority_score,
-                    "queue_depth": len(request_queue),
-                    "vram_gb": model_vram/(1024*1024*1024) if model_vram else None,
-                    "loaded": is_loaded,
-                    "ip_queued": ip_queued,
-                    "ip_recent": ip_recent,
-                    "wait_seconds": wait_time
-                }
-            )
-            
-            # Mark as actively processing BEFORE releasing lock
-            # This ensures next priority calculation sees updated ip_active count
             tracker.add_request(selected_request.ip, selected_request.model_name)
         
+        # Start processing
         asyncio.create_task(process_request(selected_request, priority_score))
 
 
 async def process_request(request: QueuedRequest, priority_score: int):
     start_time = time.time()
+    # queue_worker adds to recently_started, so this might be True even if not fully in VRAM yet
+    # We capture this to decide if we need to force a VRAM poll later
     model_was_loaded = tracker.is_model_loaded(request.model_name)
     
     try:
-        # Note: tracker.add_request() already called in queue_worker (inside lock)
-        
         model = request.model_name
         if not model.startswith("ollama/"):
             model = f"ollama/{model}"
@@ -316,19 +296,20 @@ async def process_request(request: QueuedRequest, priority_score: int):
             
             asyncio.create_task(delayed_poll())
         
-            request.future.set_result(response)
-            stats["completed_requests"] += 1
-            duration = time.time() - start_time
-            logger.info(
-                f"[{request.request_id}]",
-                extra={
-                    "event": "request_completed",
-                    "request_id": request.request_id,
-                    "ip": request.ip,
-                    "model": request.model_name,
-                    "duration_seconds": round(duration, 2)
-                }
-            )
+        request.future.set_result(response)
+        stats["completed_requests"] += 1
+        duration = time.time() - start_time
+        logger.info(
+            f"[{request.request_id}]",
+            extra={
+                "event": "request_completed",
+                "request_id": request.request_id,
+                "ip": request.ip,
+                "model": request.model_name,
+                "duration_seconds": round(duration, 2)
+            }
+        )
+        # -------------------------------
         
     except Exception as e:
         logger.exception(
@@ -343,6 +324,9 @@ async def process_request(request: QueuedRequest, priority_score: int):
         request.future.set_exception(e)
         stats["failed_requests"] += 1
     finally:
+        async with queue_lock:
+            if request.request_id in active_requests:
+                del active_requests[request.request_id]
         tracker.remove_request(request.ip, request.model_name)
 
 
@@ -442,7 +426,7 @@ async def chat_completions(request: Request):
         return JSONResponse(content=response_data.model_dump())
 
 
-@app.get("/health")
+@app.get("/proxy/health")
 async def health_check():
     async with queue_lock:
         queue_depth = len(request_queue)
@@ -460,11 +444,26 @@ async def health_check():
     }
 
 
-@app.get("/queue")
+@app.get("/proxy/queue")
 async def queue_status():
     async with queue_lock:
-        queue_items = [
+        # 1. format currently processing requests
+        processing_items = [
             {
+                "status": "processing",
+                "request_id": req.request_id,
+                "model": req.model_name,
+                "ip": req.ip,
+                "total_duration": int(time.time() - req.timestamp), # Total time since reception
+                "priority": tracker.calculate_priority(req)
+            }
+            for req in active_requests.values()
+        ]
+
+        # 2. format waiting requests
+        queued_items = [
+            {
+                "status": "queued",
                 "request_id": req.request_id,
                 "model": req.model_name,
                 "ip": req.ip,
@@ -475,17 +474,19 @@ async def queue_status():
         ]
     
     return {
-        "queue_depth": len(queue_items),
-        "requests": queue_items
+        "total_depth": len(processing_items) + len(queued_items),
+        "processing_count": len(processing_items),
+        "queued_count": len(queued_items),
+        "requests": processing_items + queued_items # Processing first, then queued
     }
 
 
-@app.get("/vram")
+@app.get("/proxy/vram")
 async def vram_status():
     return vram_monitor.get_stats()
 
 
-@app.get("/")
+@app.get("/proxy/")
 async def root():
     return {
         "service": "Ollama Smart Proxy",
@@ -499,6 +500,62 @@ async def root():
         ]
     }
 
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
+async def proxy_catch_all(request: Request, path: str):
+    """
+    Catch-all proxy: Forwards all other requests (tags, pull, generic generate, etc.)
+    directly to the backend Ollama instance transparently.
+    """
+    
+    # 1. Construct the target URL
+    # We strip trailing slashes from base to avoid double slashes
+    base_url = OLLAMA_API_BASE.rstrip("/")
+    target_url = f"{base_url}/{path}"
+    
+    # Append query parameters if they exist (e.g. ?limit=10)
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    logger.info(f"Proxying generic request: {request.method} {path} -> {target_url}")
+
+    # 2. Filter headers
+    # We generally want to forward headers, but 'host' should be strictly
+    # managed by the HTTP client to avoid confusing the backend.
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    headers.pop("content-length", None) # Let httpx recalculate this based on the stream
+
+    # 3. Create a client and send the request
+    # We use a context manager inside the handler. For high-load production, 
+    # you might want to create a global httpx.AsyncClient in lifespan.
+    client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
+
+    try:
+        # Build the request, streaming the body from the incoming client request
+        req = client.build_request(
+            request.method,
+            target_url,
+            headers=headers,
+            content=request.stream()  # Stream request body to backend
+        )
+        
+        # Send the request and get a streaming response
+        r = await client.send(req, stream=True)
+        
+        # 4. Stream the response back to the client
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=dict(r.headers),
+            # BackgroundTask ensures the client is closed after the response finishes
+            background=BackgroundTask(r.aclose)
+        )
+        
+    except Exception as e:
+        # Ensure client is closed if we crash before returning the response
+        await client.aclose()
+        logger.error(f"Proxy error for {path}: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

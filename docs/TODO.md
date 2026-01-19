@@ -30,6 +30,7 @@
 - [ ] Connection retry logic
 
 #### 2. Logging Backend
+- [ ] Allow for 2 different log levels, one for our smart proxy and one for litellm/uvicorn
 - [ ] Create `PostgresHandler` class for Python logging
 - [ ] Map log levels to database status
 - [ ] Handle request lifecycle events
