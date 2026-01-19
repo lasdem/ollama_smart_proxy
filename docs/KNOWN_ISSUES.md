@@ -1,7 +1,10 @@
 # Known Issues - Logging v3.3
 
 ## 0. CRITICAL requests are not longer processed since latest logging changes!
+**FIXED in v3.3.1** - The logging configuration has been corrected to allow all loggers to propagate to the root logger, ensuring requests are processed correctly.
+
 ## 0.1. CRITICAL LOGGING in JSON is still broken for litellm and uvicorn, maybe just deactivate those logs?
+**FIXED in v3.3.1** - All loggers (uvicorn, litellm, and their submodules) now properly use the configured formatters and propagate to the root logger.
 
 
 ## 1. Exception Tracebacks Show in Plain Text
@@ -61,4 +64,9 @@ Traceback (most recent call last):
 - [ ] Log rotation support
 - [ ] Performance metrics (request duration distribution)
 - [ ] Grafana dashboard templates
+
+### v3.3.1 (Current)
+- [x] Fixed logging configuration to allow all loggers to propagate
+- [x] Fixed uvicorn and litellm logging to use proper formatters
+- [x] Ensured requests are processed correctly
 

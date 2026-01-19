@@ -316,29 +316,28 @@ async def process_request(request: QueuedRequest, priority_score: int):
             
             asyncio.create_task(delayed_poll())
         
-        request.future.set_result(response)
-        stats["completed_requests"] += 1
-        duration = time.time() - start_time
-        logger.info(
-            f"[{request.request_id}]",
-            extra={
-                "event": "request_completed",
-                "request_id": request.request_id,
-                "ip": request.ip,
-                "model": request.model_name,
-                "duration_seconds": round(duration, 2)
-            }
-        )
+            request.future.set_result(response)
+            stats["completed_requests"] += 1
+            duration = time.time() - start_time
+            logger.info(
+                f"[{request.request_id}]",
+                extra={
+                    "event": "request_completed",
+                    "request_id": request.request_id,
+                    "ip": request.ip,
+                    "model": request.model_name,
+                    "duration_seconds": round(duration, 2)
+                }
+            )
         
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"[{request.request_id}]",
             extra={
                 "event": "request_failed",
                 "request_id": request.request_id,
                 "ip": request.ip,
                 "model": request.model_name,
-                "error": str(e)
             }
         )
         request.future.set_exception(e)

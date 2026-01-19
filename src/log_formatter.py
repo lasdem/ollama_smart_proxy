@@ -43,31 +43,62 @@ class StructuredFormatter(logging.Formatter):
             return self._format_human(record)
     
     def _format_json(self, record: logging.LogRecord) -> str:
-        """Format as single-line JSON for Loki/Grafana."""
-        log_data = {
+        """Format as single-line JSON for Loki/Grafana.
+
+        The formatter attempts to serialise all custom fields from the log record.
+        If serialisation fails (e.g. due to non‑JSON‑serialisable objects), the
+        formatter falls back to a plain string representation of the message.
+        """
+        log_data: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "logger": record.name,
             "level": record.levelname,
         }
-        
+
         # Add message if present
         if record.getMessage():
             log_data["message"] = record.getMessage()
-        
+
         # Add all extra fields from logger.info("event", extra={...})
         if hasattr(record, "event"):
             log_data["event"] = record.event
-        
+
         # Add all custom fields
         for key, value in record.__dict__.items():
-            if key not in ["name", "msg", "args", "created", "filename", "funcName",
-                          "levelname", "levelno", "lineno", "module", "msecs",
-                          "message", "pathname", "process", "processName",
-                          "relativeCreated", "thread", "threadName", "exc_info",
-                          "exc_text", "stack_info", "event"]:
+            if key not in [
+                "name",
+                "msg",
+                "args",
+                "created",
+                "filename",
+                "funcName",
+                "levelname",
+                "levelno",
+                "lineno",
+                "module",
+                "msecs",
+                "message",
+                "pathname",
+                "process",
+                "processName",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "event",
+            ]:
                 log_data[key] = value
-        
-        return json.dumps(log_data)
+
+        try:
+            try:
+                return json.dumps(log_data)
+            except Exception:
+                return record.getMessage()
+        except Exception:
+            # Fallback to a simple string representation
+            return record.getMessage()
     
     def _format_human(self, record: logging.LogRecord) -> str:
         """Format as human-readable with emojis."""
@@ -143,7 +174,10 @@ class UvicornAccessFormatter(logging.Formatter):
             # Fallback to raw message
             log_data["message"] = message
         
-        return json.dumps(log_data)
+        try:
+            return json.dumps(log_data)
+        except Exception:
+            return record.getMessage()
     
     def _format_human(self, record: logging.LogRecord) -> str:
         """Format as human-readable."""
@@ -184,45 +218,35 @@ def setup_logging(level: str = "INFO"):
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    # Add our formatter
+    # Add our formatter - use app_formatter for root to ensure consistency
     root_handler = logging.StreamHandler()
-    root_handler.setFormatter(uvicorn_formatter)
+    root_handler.setFormatter(app_formatter)
     root_logger.addHandler(root_handler)
-    
-    # Setup application logger
-    app_logger = logging.getLogger("proxy")
-    app_logger.setLevel(log_level)
-    app_logger.propagate = False
-    
-    app_handler = logging.StreamHandler()
-    app_handler.setFormatter(app_formatter)
-    app_logger.addHandler(app_handler)
-    
-    # Setup uvicorn access logger
-    uvicorn_logger = logging.getLogger("uvicorn.access")
-    uvicorn_logger.setLevel(log_level)
-    uvicorn_logger.propagate = False
-    
-    uvicorn_handler = logging.StreamHandler()
-    uvicorn_handler.setFormatter(uvicorn_formatter)
-    uvicorn_logger.addHandler(uvicorn_handler)
     
     # Setup uvicorn error logger (for startup messages and errors)
     uvicorn_error_logger = logging.getLogger("uvicorn.error")
     uvicorn_error_logger.setLevel(log_level)
-    uvicorn_error_logger.propagate = False
-    
-    uvicorn_error_handler = logging.StreamHandler()
-    uvicorn_error_handler.setFormatter(uvicorn_formatter)
-    uvicorn_error_logger.addHandler(uvicorn_error_handler)
+    uvicorn_error_logger.propagate = True  # Allow propagation to root
     
     # Setup uvicorn main logger (catches startup messages)
     uvicorn_main_logger = logging.getLogger("uvicorn")
     uvicorn_main_logger.setLevel(log_level)
-    uvicorn_main_logger.propagate = False
+    uvicorn_main_logger.propagate = True  # Allow propagation to root
     
-    uvicorn_main_handler = logging.StreamHandler()
-    uvicorn_main_handler.setFormatter(uvicorn_formatter)
-    uvicorn_main_logger.addHandler(uvicorn_main_handler)
+    # Setup uvicorn access logger
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.setLevel(log_level)
+    uvicorn_access_logger.propagate = True  # Allow propagation to root
+    
+    # Setup litellm loggers - allow them to propagate
+    for logger_name in ["litellm", "litellm.proxy", "litellm.auth", "litellm.usage", "litellm.cache", "litellm.telemetry"]:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(log_level)
+        logger.propagate = True  # Allow propagation to root
+    
+    # Create app logger
+    app_logger = logging.getLogger("smart_proxy")
+    app_logger.setLevel(log_level)
+    app_logger.propagate = True  # Allow propagation to root
     
     return app_logger
