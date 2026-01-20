@@ -20,9 +20,10 @@
 
 ## 🚀 Next Implementation Steps
 
-### v3.4.0 - PostgreSQL Logging & Analytics
+### v3.4.0 - Logging & Analytics
 
-#### 1. Database Schema Implementation
+#### 1. Database Implementation
+- [ ] DB abstraction layer, using sql alchemy to use sqlite for dev and postgres for prod
 - [ ] Create `request_logs` table with all required fields
 - [ ] Add indexes for performance (source_ip, model_name, timestamp)
 - [ ] Implement async logging using `asyncpg`

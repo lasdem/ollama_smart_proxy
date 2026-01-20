@@ -83,7 +83,7 @@ class RequestTracker:
 ```sql
 CREATE TABLE request_logs (
     id SERIAL PRIMARY KEY,
-    request_id UUID UNIQUE NOT NULL,
+    request_id VARCHAR(255) UNIQUE NOT NULL,
     source_ip VARCHAR(45) NOT NULL,
     model_name VARCHAR(255) NOT NULL,
     prompt_text TEXT,
@@ -94,10 +94,9 @@ CREATE TABLE request_logs (
     duration_seconds DECIMAL(10, 3),
     priority_score INTEGER,
     queue_wait_seconds DECIMAL(10, 3),
+    processing_time_seconds DECIMAL(10, 3),
     status VARCHAR(50),
     error_message TEXT,
-    model_vram_mb INTEGER,  -- NEW: Track VRAM usage
-    parallel_models TEXT[],  -- NEW: What models were loaded simultaneously
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
