@@ -201,13 +201,11 @@ async def test_scenario_large_model_deferral():
         print(f"   1️⃣  Blocking with {TestConfig.MODEL_STARTUP}...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_STARTUP, "Startup")))
-        await asyncio.sleep(1.0)
-
+ 
         # 2. Queue Large (First in line)
         print(f"   2️⃣  Queuing LARGE ({TestConfig.MODEL_LARGE})...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_LARGE, "Large")))
-        await asyncio.sleep(0.5)
 
         # 3. Queue Small (Last in line)
         print(f"   3️⃣  Queuing SMALL ({TestConfig.MODEL_SMALL})...")
@@ -281,6 +279,8 @@ async def test_scenario_fault_tolerance():
         assert status_codes["BAD"] != 200, "Bad model returned 200 OK"
         assert "VALID" in completion_order, "Valid request never finished (Queue Jammed)"
         
+        await asyncio.sleep(0.2)
+
         # Check Slot Cleanup
         health = (await client.get("/proxy/health")).json()
         assert health['active_requests'] == 0, f"Slots leaked: {health['active_requests']} active"

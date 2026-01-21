@@ -20,34 +20,29 @@
 
 ## 🚀 Next Implementation Steps
 
-### v3.4.0 - Logging & Analytics
+### v3.4. - Logging & Analytics
 
 #### 1. Database Implementation
-- [ ] DB abstraction layer, using sql alchemy to use sqlite for dev and postgres for prod
-- [ ] Create `request_logs` table with all required fields
-- [ ] Add indexes for performance (source_ip, model_name, timestamp)
-- [ ] Implement async logging using `asyncpg`
-- [ ] Connection pooling for production
+- [x] DB abstraction layer, using sql alchemy to use sqlite for dev and postgres for prod
+- [x] Create `request_logs` table with all required fields
+- [x] Add indexes for performance (source_ip, model_name, timestamp)
+- [x] Implement async DB request logging
+- [x] Connection pooling for production
 - [ ] Connection retry logic
 
 #### 2. Logging Backend
 - [ ] Allow for 2 different log levels, one for our smart proxy and one for litellm/uvicorn
-- [ ] Create `PostgresHandler` class for Python logging
-- [ ] Map log levels to database status
-- [ ] Handle request lifecycle events
-- [ ] Store VRAM metrics and parallel models
-- [ ] Batch writes for performance
 - [ ] Priority Score Logging Test 
+
 #### 3. Analytics Queries
-- [ ] Request rate by model/IP
-- [ ] Average wait/processing times
+- [x] Request rate by model/IP
+- [x] Average wait/processing times
 - [ ] Priority score distribution
 - [ ] Error rate analysis
 - [ ] Model bunching detection
 
 #### 4. Migration Scripts
 - [ ] Schema migration tool
-- [ ] Data migration from JSON logs
 - [ ] Backfill historical data
 
 ---

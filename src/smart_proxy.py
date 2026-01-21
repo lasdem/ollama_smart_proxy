@@ -26,7 +26,12 @@ from log_formatter import setup_logging
 import httpx
 from starlette.background import BackgroundTask
 
-load_dotenv()
+# Database and data access imports
+from database import init_db, close_db
+from data_access import (
+    get_request_log_repo,
+    init_repositories
+)
 
 # Setup logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -56,6 +61,12 @@ litellm.drop_params = True
 # Global request counter
 request_counter = 0
 counter_lock = asyncio.Lock()
+
+# Initialize database and repositories
+init_db()
+init_repositories()
+
+request_repo = get_request_log_repo()
 
 def generate_request_id(ip: str, model: str) -> str:
     """Generate unique request ID: REQ{counter:04d}_{ip}_{model}_{hash:4}"""
@@ -299,6 +310,18 @@ async def process_request(request: QueuedRequest, priority_score: int):
         request.future.set_result(response)
         stats["completed_requests"] += 1
         duration = time.time() - start_time
+        
+        # Log to database
+        await asyncio.to_thread(
+            request_repo.log_request,
+            request.request_id,
+            request.ip,
+            request.model_name,
+            "completed",
+            duration,
+            priority_score
+        )
+        
         logger.info(
             f"[{request.request_id}]",
             extra={
@@ -312,6 +335,19 @@ async def process_request(request: QueuedRequest, priority_score: int):
         # -------------------------------
         
     except Exception as e:
+        duration = time.time() - start_time
+        
+        # Log error to database
+        await asyncio.to_thread(
+            request_repo.log_request,
+            request.request_id,
+            request.ip,
+            request.model_name,
+            "error",
+            duration,
+            priority_score
+        )
+        
         logger.exception(
             f"[{request.request_id}]",
             extra={
@@ -352,6 +388,7 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     vram_monitor.stop()
+    
     logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 
 
