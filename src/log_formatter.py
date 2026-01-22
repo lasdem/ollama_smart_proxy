@@ -161,21 +161,21 @@ class UvicornAccessFormatter(logging.Formatter):
         """Format as JSON."""
         message = record.getMessage()
         
+        # Skip logging for health and queue status endpoints
+        import re
+        match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
+        
         log_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "logger": "uvicorn",
             "level": record.levelname,
         }
         
-        # Regex to parse uvicorn's standard access log format
-        import re
-        match = re.match(r'([\d.]+:\d+) - "(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^ ]+) [^"]+" (\d+)', message)
-        
         if match:
             log_data["client"] = match.group(1)
             log_data["method"] = match.group(2)
             log_data["path"] = match.group(3)
-            log_data["status"] = int(match.group(4))
+            log_data["status"] = match.group(4)
         else:
             log_data["message"] = message
         
@@ -199,11 +199,16 @@ class UvicornAccessFormatter(logging.Formatter):
         return f"[uvicorn] {timestamp} | {message}"
 
 
-def setup_logging(level: str = "INFO"):
+def setup_logging(level: str = "INFO", access_level: str = None):
     """
     Setup logging with structured formatters.
+    
+    Args:
+        level: Log level for smart_proxy and application logs
+        access_level: Log level for uvicorn access logs (defaults to level if not specified)
     """
     log_level = getattr(logging, level.upper(), logging.INFO)
+    access_log_level = getattr(logging, (access_level or level).upper(), log_level)
     
     # Create Root Handler
     # We attach the formatter HERE so it applies to everything bubbling up
@@ -226,7 +231,7 @@ def setup_logging(level: str = "INFO"):
     
     # Uvicorn Access (needs special parsing logic)
     uvicorn_access = logging.getLogger("uvicorn.access")
-    uvicorn_access.setLevel(log_level)
+    uvicorn_access.setLevel(access_log_level)
     # We clear handlers and ADD a specific one, preventing propagation to avoid double logging
     # (One structured, one raw from root)
     if uvicorn_access.handlers:

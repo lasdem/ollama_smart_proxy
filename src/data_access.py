@@ -52,7 +52,22 @@ class RequestLogRepository:
         except Exception as e:
             session.rollback()
             logger.error(f"Failed to create request log: {e}")
-            raise
+            
+            # Fallback to file-based logging
+            request_data['created_at'] = datetime.utcnow().isoformat()
+            self.db.write_to_fallback_file(request_data)
+            
+            # Return a mock object to indicate the request was logged (to fallback)
+            return RequestLog(
+                request_id=request_data.get('request_id'),
+                source_ip=request_data.get('source_ip'),
+                model_name=request_data.get('model_name'),
+                prompt_text=request_data.get('prompt_text'),
+                timestamp_received=request_data.get('timestamp_received'),
+                status=request_data.get('status'),
+                priority_score=request_data.get('priority_score'),
+                created_at=datetime.utcnow()
+            )
         finally:
             session.close()
     
@@ -99,11 +114,29 @@ class RequestLogRepository:
         except Exception as e:
             session.rollback()
             logger.error(f"Failed to update request log: {e}")
-            raise
+            
+            # Fallback to file-based logging for updates
+            update_data['request_id'] = request_id
+            update_data['created_at'] = datetime.utcnow().isoformat()
+            self.db.write_to_fallback_file(update_data)
+            
+            # Return a mock object to indicate the update was logged (to fallback)
+            return RequestLog(
+                request_id=request_id,
+                response_text=update_data.get('response_text'),
+                timestamp_started=update_data.get('timestamp_started'),
+                timestamp_completed=update_data.get('timestamp_completed'),
+                duration_seconds=update_data.get('duration_seconds'),
+                queue_wait_seconds=update_data.get('queue_wait_seconds'),
+                processing_time_seconds=update_data.get('processing_time_seconds'),
+                status=update_data.get('status'),
+                error_message=update_data.get('error_message'),
+                created_at=datetime.utcnow()
+            )
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None) -> Optional[RequestLog]:
         """
         Log or update a request
         
@@ -114,6 +147,11 @@ class RequestLogRepository:
             status: Request status (queued, completed, error)
             duration_seconds: Duration in seconds
             priority_score: Priority score
+            prompt_text: Optional prompt text
+            response_text: Optional response text
+            timestamp_started: Optional timestamp when processing started
+            queue_wait_seconds: Optional queue wait time in seconds
+            processing_time_seconds: Optional processing time in seconds
             
         Returns:
             RequestLog: Request log object or None if not found
@@ -128,8 +166,23 @@ class RequestLogRepository:
                 # Update existing request log
                 request_log.status = status
                 request_log.duration_seconds = duration_seconds
-                request_log.timestamp_completed = datetime.utcnow()
-                if status == "error":
+                
+                # Update optional fields if provided
+                if prompt_text is not None:
+                    request_log.prompt_text = prompt_text
+                if response_text is not None:
+                    request_log.response_text = response_text
+                if timestamp_started is not None:
+                    request_log.timestamp_started = timestamp_started
+                if queue_wait_seconds is not None:
+                    request_log.queue_wait_seconds = queue_wait_seconds
+                if processing_time_seconds is not None:
+                    request_log.processing_time_seconds = processing_time_seconds
+                
+                if status == "completed":
+                    request_log.timestamp_completed = datetime.utcnow()
+                elif status == "error":
+                    request_log.timestamp_completed = datetime.utcnow()
                     request_log.error_message = "Request completed with status: error"
             else:
                 # Create new request log
@@ -137,11 +190,15 @@ class RequestLogRepository:
                     request_id=request_id,
                     source_ip=source_ip,
                     model_name=model_name,
+                    prompt_text=prompt_text,
                     status=status,
                     priority_score=priority_score,
                     timestamp_received=datetime.utcnow(),
                     duration_seconds=duration_seconds,
-                    timestamp_completed=datetime.utcnow()
+                    timestamp_started=timestamp_started,
+                    queue_wait_seconds=queue_wait_seconds,
+                    processing_time_seconds=processing_time_seconds,
+                    timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None
                 )
                 session.add(request_log)
             
@@ -152,7 +209,46 @@ class RequestLogRepository:
         except Exception as e:
             session.rollback()
             logger.error(f"Failed to log request {request_id}: {e}")
-            raise
+            
+            # Fallback to file-based logging
+            request_data = {
+                'request_id': request_id,
+                'source_ip': source_ip,
+                'model_name': model_name,
+                'prompt_text': prompt_text,
+                'response_text': response_text,
+                'timestamp_received': datetime.utcnow().isoformat() if not timestamp_started else timestamp_started.isoformat(),
+                'timestamp_started': timestamp_started.isoformat() if timestamp_started else None,
+                'timestamp_completed': datetime.utcnow().isoformat() if status in ["completed", "error"] else None,
+                'duration_seconds': duration_seconds,
+                'priority_score': priority_score,
+                'queue_wait_seconds': queue_wait_seconds,
+                'processing_time_seconds': processing_time_seconds,
+                'status': status,
+                'error_message': "Request completed with status: error" if status == "error" else None,
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            self.db.write_to_fallback_file(request_data)
+            
+            # Return a mock object to indicate the request was logged (to fallback)
+            return RequestLog(
+                request_id=request_id,
+                source_ip=source_ip,
+                model_name=model_name,
+                prompt_text=prompt_text,
+                response_text=response_text,
+                timestamp_received=datetime.utcnow(),
+                timestamp_started=timestamp_started,
+                timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None,
+                duration_seconds=duration_seconds,
+                priority_score=priority_score,
+                queue_wait_seconds=queue_wait_seconds,
+                processing_time_seconds=processing_time_seconds,
+                status=status,
+                error_message="Request completed with status: error" if status == "error" else None,
+                created_at=datetime.utcnow()
+            )
         finally:
             session.close()
 
@@ -292,6 +388,18 @@ class AnalyticsRepository:
             List[Dict]: Request count over time
         """
         return self.analytics.get_requests_over_time(interval)
+    
+        def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+            """
+            Get priority score distribution (histogram, avg, min, max) grouped by model or time
+            Args:
+                start_time: Start time for query
+                end_time: End time for query
+                group_by: 'model_name' or 'hour'
+            Returns:
+                List[Dict]: Distribution stats
+            """
+            return self.analytics.get_priority_score_distribution(start_time, end_time, group_by)
 
 
 # Global repository instances

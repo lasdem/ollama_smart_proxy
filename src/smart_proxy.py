@@ -34,8 +34,10 @@ from data_access import (
 )
 
 # Setup logging
+LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-logger = setup_logging(LOG_LEVEL)
+ACCESS_LOG_LEVEL = os.getenv("ACCESS_LOG_LEVEL", "WARNING")  # Set to WARNING to suppress health/queue logs
+logger = setup_logging(LOG_LEVEL, ACCESS_LOG_LEVEL)
 
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
 PROXY_HOST = os.getenv("PROXY_HOST", "0.0.0.0")
@@ -275,6 +277,20 @@ async def process_request(request: QueuedRequest, priority_score: int):
     # We capture this to decide if we need to force a VRAM poll later
     model_was_loaded = tracker.is_model_loaded(request.model_name)
     
+    # Log that processing has started
+    queue_wait = start_time - request.timestamp
+    await asyncio.to_thread(
+        request_repo.log_request,
+        request.request_id,
+        request.ip,
+        request.model_name,
+        "processing",
+        0,  # duration will be updated later
+        priority_score,
+        timestamp_started=datetime.utcnow(),
+        queue_wait_seconds=queue_wait
+    )
+    
     try:
         model = request.model_name
         if not model.startswith("ollama/"):
@@ -290,6 +306,11 @@ async def process_request(request: QueuedRequest, priority_score: int):
             api_base=OLLAMA_API_BASE,
             timeout=REQUEST_TIMEOUT
         )
+        
+        # Capture response text for non-streaming responses
+        response_text = None
+        if not should_stream:
+            response_text = response.choices[0].message.content if response.choices else None
         
         # If model wasn't loaded before, trigger immediate VRAM poll after brief delay
         if not model_was_loaded:
@@ -310,6 +331,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
         request.future.set_result(response)
         stats["completed_requests"] += 1
         duration = time.time() - start_time
+        processing_time = duration - queue_wait
         
         # Log to database
         await asyncio.to_thread(
@@ -319,7 +341,9 @@ async def process_request(request: QueuedRequest, priority_score: int):
             request.model_name,
             "completed",
             duration,
-            priority_score
+            priority_score,
+            response_text=response_text,
+            processing_time_seconds=processing_time
         )
         
         logger.info(
@@ -336,6 +360,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
         
     except Exception as e:
         duration = time.time() - start_time
+        queue_wait = start_time - request.timestamp
+        processing_time = duration - queue_wait
         
         # Log error to database
         await asyncio.to_thread(
@@ -345,7 +371,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
             request.model_name,
             "error",
             duration,
-            priority_score
+            priority_score,
+            processing_time_seconds=processing_time
         )
         
         logger.exception(
@@ -395,6 +422,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ollama Smart Proxy", version="3.2", lifespan=lifespan)
 
 
+@app.post("/api/chat")
 @app.post("/chat/completions")
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -429,11 +457,32 @@ async def chat_completions(request: Request):
         future=future
     )
     
+    # Calculate priority score for logging
+    priority_score = tracker.calculate_priority(queued_request)
+    
+    # Log request to database when queued
+    prompt_text = None
+    if 'messages' in body:
+        messages = body['messages']
+        if isinstance(messages, list) and len(messages) > 0:
+            prompt_text = messages[0].get('content', '') if isinstance(messages[0], dict) else str(messages[0])
+    
+    await asyncio.to_thread(
+        request_repo.log_request,
+        req_id,
+        client_ip,
+        model_name,
+        "queued",
+        0,  # duration will be updated later
+        priority_score,
+        prompt_text=prompt_text
+    )
+    
+    # Add request to queue
     async with queue_lock:
         request_queue.append(queued_request)
         stats["total_requests"] += 1
         stats["queue_depth_max"] = max(stats["queue_depth_max"], len(request_queue))
-        queue_depth = len(request_queue)
     
     logger.info(
         f"[{req_id}]",
@@ -442,7 +491,7 @@ async def chat_completions(request: Request):
             "request_id": req_id,
             "ip": client_ip,
             "model": model_name,
-            "queue_depth": queue_depth
+            "queue_depth": len(request_queue)
         }
     )
     
@@ -600,9 +649,13 @@ if __name__ == "__main__":
     # Use minimal logging config - our setup_logging() already configured everything
     log_config = {
         "version": 1,
-        "disable_existing_loggers": False,
+        "disable_existing_loggers": True,
         "formatters": {
             "default": {"format": "%(message)s"},
+            "access": {
+                "()": "log_formatter.UvicornAccessFormatter",
+                "mode": LOG_FORMAT
+            },
         },
         "handlers": {
             "default": {
@@ -610,11 +663,16 @@ if __name__ == "__main__":
                 "class": "logging.StreamHandler",
                 "stream": "ext://sys.stdout",
             },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
         },
         "loggers": {
-            "uvicorn": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
-            "uvicorn.error": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
-            "uvicorn.access": {"handlers": ["default"], "level": LOG_LEVEL, "propagate": False},
+            "uvicorn": {"handlers": ["access"], "level": ACCESS_LOG_LEVEL, "propagate": False},
+            "uvicorn.error": {"handlers": ["access"], "level": ACCESS_LOG_LEVEL, "propagate": False},
+            "uvicorn.access": {"handlers": ["access"], "level": ACCESS_LOG_LEVEL, "propagate": False},
         },
     }
     

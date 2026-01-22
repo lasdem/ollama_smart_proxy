@@ -5,6 +5,8 @@ Uses SQLAlchemy for database abstraction to support both SQLite (dev) and Postgr
 """
 import os
 import logging
+import json
+import fcntl
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+
 # Database configuration
 DB_TYPE = os.getenv("DB_TYPE", "sqlite")  # "sqlite" or "postgres"
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -27,7 +30,10 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "smart_proxy")
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
-SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "/db/smart_proxy.db")
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "./db/smart_proxy.db")
+# Use a user-writable default for fallback logs
+FALLBACK_LOG_DIR = os.getenv("FALLBACK_LOG_DIR", "./db/fallback_logs")
+FALLBACK_LOG_MAX_SIZE = int(os.getenv("FALLBACK_LOG_MAX_SIZE", "10485760"))  # 10MB default
 
 # Base model
 Base = declarative_base()
@@ -65,6 +71,7 @@ class DatabaseConnection:
         self.engine = None
         self.SessionLocal = None
         self._initialize_connection()
+        self._ensure_fallback_dir_exists()
     
     def _get_db_config(self):
         """Get current database configuration from environment"""
@@ -77,6 +84,13 @@ class DatabaseConnection:
             'DB_PASSWORD': os.getenv("DB_PASSWORD", "postgres"),
             'SQLITE_DB_PATH': os.getenv("SQLITE_DB_PATH", "/db/smart_proxy.db")
         }
+    
+    def _ensure_fallback_dir_exists(self):
+        """Ensure fallback log directory exists"""
+        fallback_dir = Path(FALLBACK_LOG_DIR)
+        if not fallback_dir.exists():
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created fallback log directory: {fallback_dir}")
     
     def _initialize_connection(self):
         """Initialize database connection based on configuration"""
@@ -128,6 +142,133 @@ class DatabaseConnection:
         if self.engine:
             self.engine.dispose()
             logger.info("Database connection closed")
+    
+    def write_to_fallback_file(self, request_data: Dict[str, Any]) -> bool:
+        """
+        Write request data to fallback log file.
+        
+        Args:
+            request_data: Dictionary containing request log data
+            
+        Returns:
+            bool: True if write was successful, False otherwise
+        """
+        try:
+            # Generate filename based on timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{FALLBACK_LOG_DIR}/fallback_{timestamp}.jsonl"
+            
+            # Write data to file with locking
+            with open(filename, 'a') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                json_line = json.dumps(request_data)
+                f.write(json_line + '\n')
+                f.flush()
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            
+            logger.info(f"Written to fallback file: {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to write to fallback file: {e}")
+            return False
+    
+    def recover_from_fallback_files(self) -> int:
+        """
+        Recover data from fallback log files and insert into database.
+        
+        Returns:
+            int: Number of records recovered
+        """
+        recovered_count = 0
+        fallback_dir = Path(FALLBACK_LOG_DIR)
+        
+        if not fallback_dir.exists():
+            logger.info("No fallback directory found, nothing to recover")
+            return 0
+        
+        # Get all fallback files sorted by modification time
+        fallback_files = sorted(
+            fallback_dir.glob("fallback_*.jsonl"),
+            key=lambda x: x.stat().st_mtime
+        )
+        
+        if not fallback_files:
+            logger.info("No fallback files found")
+            return 0
+        
+        logger.info(f"Found {len(fallback_files)} fallback file(s) to recover")
+        
+        for file_path in fallback_files:
+            try:
+                with open(file_path, 'r') as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    lines = f.readlines()
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                
+                if not lines:
+                    continue
+                
+                session = self.get_session()
+                
+                for line in lines:
+                    try:
+                        record = json.loads(line.strip())
+                        
+                        # Check if record already exists in database
+                        existing = session.query(RequestLog).filter_by(
+                            request_id=record.get('request_id')
+                        ).first()
+                        
+                        if existing:
+                            logger.debug(f"Record {record.get('request_id')} already exists, skipping")
+                            continue
+                        
+                        # Create new record
+                        request_log = RequestLog(
+                            request_id=record.get('request_id'),
+                            source_ip=record.get('source_ip'),
+                            model_name=record.get('model_name'),
+                            prompt_text=record.get('prompt_text'),
+                            response_text=record.get('response_text'),
+                            timestamp_received=datetime.fromisoformat(record.get('timestamp_received')) if record.get('timestamp_received') else None,
+                            timestamp_started=datetime.fromisoformat(record.get('timestamp_started')) if record.get('timestamp_started') else None,
+                            timestamp_completed=datetime.fromisoformat(record.get('timestamp_completed')) if record.get('timestamp_completed') else None,
+                            duration_seconds=record.get('duration_seconds'),
+                            priority_score=record.get('priority_score'),
+                            queue_wait_seconds=record.get('queue_wait_seconds'),
+                            processing_time_seconds=record.get('processing_time_seconds'),
+                            status=record.get('status'),
+                            error_message=record.get('error_message'),
+                            created_at=datetime.fromisoformat(record.get('created_at')) if record.get('created_at') else datetime.utcnow()
+                        )
+                        
+                        session.add(request_log)
+                        recovered_count += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing line: {e}")
+                        continue
+                
+                session.commit()
+                
+            except Exception as e:
+                logger.error(f"Error recovering from file {file_path}: {e}")
+                session.rollback()
+                continue
+            finally:
+                session.close()
+        
+        # Remove processed files
+        for file_path in fallback_files:
+            try:
+                file_path.unlink()
+                logger.info(f"Removed processed fallback file: {file_path}")
+            except Exception as e:
+                logger.error(f"Error removing file {file_path}: {e}")
+        
+        logger.info(f"Recovered {recovered_count} records from fallback files")
+        return recovered_count
 
 
 class AnalyticsQueryBuilder:
@@ -176,6 +317,58 @@ class AnalyticsQueryBuilder:
             ]
         except Exception as e:
             logger.error(f"Failed to get request count by model: {e}")
+            raise
+        finally:
+            session.close()
+    
+    def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get priority score distribution (histogram, avg, min, max) grouped by model or time
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'hour' (time bucket)
+        Returns:
+            List[Dict]: Distribution stats
+        """
+        try:
+            session = self.db.get_session()
+            if group_by == 'model_name':
+                group_col = 'model_name'
+            elif group_by == 'hour':
+                group_col = "DATE_TRUNC('hour', timestamp_received)"
+            else:
+                group_col = 'model_name'
+
+            result = session.execute(text(f"""
+                SELECT 
+                    {group_col} as group_key,
+                    COUNT(*) as count,
+                    AVG(priority_score) as avg_score,
+                    MIN(priority_score) as min_score,
+                    MAX(priority_score) as max_score
+                FROM request_logs
+                WHERE timestamp_received BETWEEN :start_time AND :end_time
+                    AND priority_score IS NOT NULL
+                GROUP BY group_key
+                ORDER BY count DESC
+            """), {
+                "start_time": start_time,
+                "end_time": end_time
+            }).fetchall()
+
+            return [
+                {
+                    "group": row[0],
+                    "count": row[1],
+                    "avg_score": row[2],
+                    "min_score": row[3],
+                    "max_score": row[4]
+                }
+                for row in result
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get priority score distribution: {e}")
             raise
         finally:
             session.close()
@@ -373,6 +566,15 @@ def init_db():
         # Create new connection
         db_connection = DatabaseConnection()
         analytics_query_builder = AnalyticsQueryBuilder(db_connection)
+        
+        # Recover from fallback files after initialization
+        try:
+            recovered_count = db_connection.recover_from_fallback_files()
+            if recovered_count > 0:
+                logger.info(f"Recovered {recovered_count} records from fallback files")
+        except Exception as e:
+            logger.error(f"Failed to recover from fallback files: {e}")
+        
         logger.info("Database initialized")
 
 

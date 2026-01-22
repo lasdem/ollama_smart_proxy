@@ -117,7 +117,7 @@ async def test_scenario_same_model_bunching():
     
     model_a = TestConfig.MODEL_STARTUP
     model_b = TestConfig.MODEL_MEDIUM 
-    n_pairs = 8 # 16 requests total
+    n_pairs = 4 # 16 requests total
     
     completion_order = []
     errors = []

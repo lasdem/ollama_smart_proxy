@@ -20,28 +20,29 @@
 
 ## 🚀 Next Implementation Steps
 
-### v3.4. - Logging & Analytics
+### v3.4 - Logging & Analytics
 
-#### 1. Database Implementation
+#### v3.4.1 Database Implementation
 - [x] DB abstraction layer, using sql alchemy to use sqlite for dev and postgres for prod
 - [x] Create `request_logs` table with all required fields
 - [x] Add indexes for performance (source_ip, model_name, timestamp)
 - [x] Implement async DB request logging
 - [x] Connection pooling for production
-- [ ] Connection retry logic
+- [x] Connection retry logic
 
-#### 2. Logging Backend
-- [ ] Allow for 2 different log levels, one for our smart proxy and one for litellm/uvicorn
-- [ ] Priority Score Logging Test 
+#### v3.4.2 Logging Backend
+- [x] Allow for 2 different log levels, one for our smart proxy and one for litellm/uvicorn
+- [x] Suppress non-structured logs from dependencies
+- [x] logs for health checks and queue status endpoints should only show for INFO level and below
 
-#### 3. Analytics Queries
+#### v3.4.3 Analytics Queries
 - [x] Request rate by model/IP
 - [x] Average wait/processing times
 - [ ] Priority score distribution
 - [ ] Error rate analysis
 - [ ] Model bunching detection
 
-#### 4. Migration Scripts
+#### v3.4.4 Migration Scripts
 - [ ] Schema migration tool
 - [ ] Backfill historical data
 
@@ -49,49 +50,21 @@
 
 ### v3.5.0 - Docker & Production Deployment
 
-#### 1. Docker Configuration
+#### v3.5.1 Docker Configuration
 - [ ] Multi-stage Dockerfile (builder + runtime)
 - [ ] Health check endpoint
 - [ ] Resource limits (CPU/memory)
 - [ ] Environment variable documentation
 
-#### 2. docker-compose.yml
+#### v3.5.2 docker-compose.yml
 - [ ] PostgreSQL service
 - [ ] Proxy service with dependencies
 - [ ] Volume mounts for logs
 - [ ] Network configuration
 
-#### 3. Deployment Scripts
+#### v3.5.3 Deployment Scripts
 - [ ] Deployment checklist
 - [ ] Rollback procedure
 - [ ] Configuration validation
+- [ ] Grafana Monitoring setup guide
 
-#### 4. Production Monitoring
-- [ ] Log rotation configuration
-- [ ] Process supervisor (systemd)
-- [ ] Backup strategy
-
----
-
-### v3.6.0 - Metrics & Observability
-
-#### 1. Prometheus Endpoint
-- [ ] `/metrics` endpoint
-- [ ] Request counter (total, by model)
-- [ ] Duration histogram (wait + processing)
-- [ ] Queue depth gauge
-- [ ] Active requests gauge
-- [ ] VRAM usage gauge
-
-#### 2. Grafana Dashboards
-- [ ] Overview dashboard (requests, errors, queue)
-- [ ] Performance dashboard (latency, throughput)
-- [ ] Fairness dashboard (IP distribution, rate limiting)
-- [ ] VRAM dashboard (usage, model tracking)
-- [ ] Alerting rules
-
-#### 3. Logging Improvements
-- [ ] Custom exception handler for structured tracebacks
-- [ ] Suppress non-structured logs from dependencies
-- [ ] Log sampling for high-volume scenarios
-- [ ] Audit log for administrative actions
