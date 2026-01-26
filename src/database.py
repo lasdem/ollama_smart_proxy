@@ -273,24 +273,74 @@ class DatabaseConnection:
 
 class AnalyticsQueryBuilder:
     """Analytics query builder for database-agnostic queries"""
-    
+
     def __init__(self, db_connection: DatabaseConnection):
         self.db = db_connection
-    
-    def get_request_count_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
+
+    def get_error_rate_analysis(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
-        Get request count by model
-        
+        Get error rate analysis grouped by model or time
         Args:
             start_time: Start time for query
             end_time: End time for query
-            
+            group_by: 'model_name' or 'hour' (time bucket)
+        Returns:
+            List[Dict]: Error rate stats
+        """
+        try:
+            session = self.db.get_session()
+            if group_by == 'model_name':
+                group_col = 'model_name'
+            elif group_by == 'hour':
+                group_col = "DATE_TRUNC('hour', timestamp_received)"
+            else:
+                group_col = 'model_name'
+
+            # Use GROUP_CONCAT for SQLite compatibility instead of ARRAY_AGG
+            result = session.execute(text(f"""
+                SELECT 
+                    {group_col} as group_key,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as error_count,
+                    ROUND(100.0 * SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) / COUNT(*), 2) as error_rate_percent,
+                    GROUP_CONCAT(CASE WHEN status = 'failed' THEN error_message END, '|') as error_messages
+                FROM request_logs
+                WHERE timestamp_received BETWEEN :start_time AND :end_time
+                GROUP BY group_key
+                ORDER BY error_rate_percent DESC
+            """), {
+                "start_time": start_time,
+                "end_time": end_time
+            }).fetchall()
+
+            return [
+                {
+                    "group": row[0],
+                    "total": row[1],
+                    "error_count": row[2],
+                    "error_rate_percent": row[3],
+                    "error_messages": row[4]
+                }
+                for row in result
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get error rate analysis: {e}")
+            raise
+        finally:
+            session.close()
+
+    def get_request_count_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
+        """
+        Get request count by model
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
         Returns:
             List[Dict]: List of model statistics
         """
         try:
             session = self.db.get_session()
-            
+
             result = session.execute(text("""
                 SELECT 
                     model_name,
@@ -305,7 +355,7 @@ class AnalyticsQueryBuilder:
                 "start_time": start_time,
                 "end_time": end_time
             }).fetchall()
-            
+
             return [
                 {
                     "model": row[0],
@@ -320,7 +370,7 @@ class AnalyticsQueryBuilder:
             raise
         finally:
             session.close()
-    
+
     def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
         Get priority score distribution (histogram, avg, min, max) grouped by model or time

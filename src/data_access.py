@@ -319,6 +319,17 @@ class RequestLogRepository:
 
 
 class AnalyticsRepository:
+    def get_error_rate_analysis(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get error rate analysis grouped by model or time
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'hour'
+        Returns:
+            List[Dict]: Error rate stats
+        """
+        return self.analytics.get_error_rate_analysis(start_time, end_time, group_by)
     """Repository for analytics data access"""
     
     def __init__(self):
@@ -389,17 +400,17 @@ class AnalyticsRepository:
         """
         return self.analytics.get_requests_over_time(interval)
     
-        def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
-            """
-            Get priority score distribution (histogram, avg, min, max) grouped by model or time
-            Args:
-                start_time: Start time for query
-                end_time: End time for query
-                group_by: 'model_name' or 'hour'
-            Returns:
-                List[Dict]: Distribution stats
-            """
-            return self.analytics.get_priority_score_distribution(start_time, end_time, group_by)
+    def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get priority score distribution (histogram, avg, min, max) grouped by model or time
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'hour'
+        Returns:
+            List[Dict]: Distribution stats
+        """
+        return self.analytics.get_priority_score_distribution(start_time, end_time, group_by)
 
 
 # Global repository instances
