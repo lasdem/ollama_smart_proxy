@@ -1,3 +1,52 @@
+import subprocess
+import signal
+import sys
+import tempfile
+
+# This fixture starts the proxy in the background and captures logs for all tests
+import pytest
+
+@pytest.fixture(scope="session", autouse=True)
+def start_proxy_service():
+    """
+    Start the proxy service in the background before any tests run, and stop it after all tests complete.
+    Captures stdout/stderr to a temp log file.
+    """
+    log_file = tempfile.NamedTemporaryFile(delete=False, mode="w+t", suffix="_proxy.log")
+    # Use the conda python and run the proxy
+    proxy_proc = subprocess.Popen([
+        sys.executable, "src/smart_proxy.py"
+    ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)))
+
+    # Wait for proxy to be ready (poll health endpoint)
+    import time as _time
+    import requests
+    ready = False
+    for _ in range(60):
+        try:
+            resp = requests.get("http://localhost:8003/proxy/health", timeout=1)
+            if resp.status_code == 200:
+                ready = True
+                break
+        except Exception:
+            pass
+        _time.sleep(0.5)
+    if not ready:
+        proxy_proc.terminate()
+        log_file.seek(0)
+        logs = log_file.read()
+        pytest.fail(f"Proxy did not start in time. Log output:\n{logs}")
+
+    yield log_file.name
+
+    # Teardown: terminate proxy
+    proxy_proc.terminate()
+    try:
+        proxy_proc.wait(timeout=10)
+    except Exception:
+        proxy_proc.kill()
+    log_file.close()
+    
 import asyncio
 import httpx
 import pytest

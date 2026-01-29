@@ -32,6 +32,10 @@ HEADERS="ID|CREATED_AT|STATUS|DUR(s)|WAIT(s)|PROC(s)|SOURCE_IP|MODEL|PRIO"
 # We increased the number columns to 8 chars to fit "10.123" comfortably.
 AWK_FMT="%-6s %-19s %-10.10s %-8s %-8s %-8s %-15.15s %-20.20s %-4s\n"
 
+# 4. Number of old records to show on initial load
+# (Set in INITIALIZATION section)
+INITIAL_LOAD_COUNT=30
+
 # ==============================================================================
 # SETUP
 # ==============================================================================
@@ -61,7 +65,7 @@ MAX_ID=$(sqlite3 "$DB_PATH" "SELECT MAX(id) FROM $TABLE;")
 if [[ -z "$MAX_ID" ]]; then 
     LAST_ID=0 
 else 
-    LAST_ID=$((MAX_ID - 15))
+    LAST_ID=$((MAX_ID - $INITIAL_LOAD_COUNT))
     if [ "$LAST_ID" -lt 0 ]; then LAST_ID=0; fi
 fi
 
