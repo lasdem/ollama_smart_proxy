@@ -8,9 +8,6 @@ TABLE="request_logs"
 # ==============================================================================
 
 # 1. SQL Query
-# - strftime: Removes milliseconds from timestamp
-# - ROUND(..., 3): Rounds floats to 3 decimals
-# - IFNULL: Handles nulls so the layout doesn't break
 QUERY_SQL="SELECT 
     id, 
     strftime('%Y-%m-%d %H:%M:%S', created_at), 
@@ -26,84 +23,97 @@ FROM $TABLE"
 # 2. Header Labels
 HEADERS="ID|CREATED_AT|STATUS|DUR(s)|WAIT(s)|PROC(s)|SOURCE_IP|MODEL|PRIO"
 
-# 3. AWK Format String
-# %-Ns   = Left align, width N
-# %.Ns   = Hard truncate at N chars (prevents wrapping lines)
-# We increased the number columns to 8 chars to fit "10.123" comfortably.
-AWK_FMT="%-6s %-19s %-10.10s %-8s %-8s %-8s %-15.15s %-20.20s %-4s\n"
-
-# 4. Number of old records to show on initial load
-# (Set in INITIALIZATION section)
-INITIAL_LOAD_COUNT=30
+# 3. AWK Format (No trailing newline)
+AWK_FMT="%-6s %-19s %-10.10s %-8s %-8s %-8s %-15.15s %-20.20s %-4s"
 
 # ==============================================================================
 # SETUP
 # ==============================================================================
 
+# Cleanup function to restore terminal state on exit (Ctrl+C)
 cleanup() {
-    tput csr 0 $(tput lines)  # Reset scrolling
-    tput cnorm                # Show cursor
+    tput cnorm       # Show cursor
+    stty echo        # Enable input echoing
+    tput cup $(tput lines) 0
     echo ""
     exit
 }
 trap cleanup SIGINT
 
+# Visual styles
 HEADER_BG=$(tput setab 4) # Blue Background
 HEADER_FG=$(tput setaf 7) # White Text
 RESET=$(tput sgr0)
 
-# ==============================================================================
-# INITIALIZATION
-# ==============================================================================
-
+# Prepare Terminal
 clear
-tput civis # Hide cursor
-
-# 1. Initialize LAST_ID
-# Start 15 records back to fill the screen on load
-MAX_ID=$(sqlite3 "$DB_PATH" "SELECT MAX(id) FROM $TABLE;")
-if [[ -z "$MAX_ID" ]]; then 
-    LAST_ID=0 
-else 
-    LAST_ID=$((MAX_ID - $INITIAL_LOAD_COUNT))
-    if [ "$LAST_ID" -lt 0 ]; then LAST_ID=0; fi
-fi
-
-# 2. Draw Sticky Header
-tput cup 0 0
-# Draw background bar
-printf "${HEADER_BG}%*s${RESET}\n" "$(tput cols)" "" 
-tput cup 0 0
-# Print formatted header
-echo "$HEADERS" | awk -F'|' "{printf \"$AWK_FMT\", \$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9}" | sed "s/^/${HEADER_BG}${HEADER_FG}/" | sed "s/$/${RESET}/"
-
-# 3. Set Scrolling Region (Freeze top line)
-tput csr 1 $(($(tput lines) - 1)) 
+tput civis   # Hide cursor
+stty -echo   # Disable input echoing (prevents typing artifacts)
 
 # ==============================================================================
 # MAIN LOOP
 # ==============================================================================
 
 while true; do
-    # Fetch new records as a pipe-separated list
-    NEW_DATA=$(sqlite3 -separator '|' "$DB_PATH" \
-        "$QUERY_SQL WHERE id > $LAST_ID ORDER BY id ASC;")
+    # 1. Get Terminal Dimensions
+    # We re-check this every loop so resizing the window works instantly
+    LINES=$(tput lines)
+    COLS=$(tput cols)
 
-    if [ ! -z "$NEW_DATA" ]; then
-        
-        # Move cursor to bottom of scroll region
-        tput cup $(($(tput lines) - 1)) 0
-        
-        # Process and Print strictly formatted lines
-        echo "$NEW_DATA" | awk -F'|' "{printf \"$AWK_FMT\", \$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9}"
+    # Calculate safe width (COLS - 1) to prevent auto-wrapping
+    # Calculate max data rows (Total lines - 1 Header - 1 Bottom Buffer)
+    SAFE_WIDTH=$((COLS - 1))
+    MAX_ROWS=$((LINES - 2))
 
-        # Update LAST_ID to the ID of the last record found
-        NEW_LAST_ID=$(echo "$NEW_DATA" | tail -n 1 | cut -d'|' -f1)
-        
-        if [[ "$NEW_LAST_ID" =~ ^[0-9]+$ ]]; then
-            LAST_ID=$NEW_LAST_ID
-        fi
+    if [[ $MAX_ROWS -lt 1 ]]; then MAX_ROWS=0; fi
+
+    # 2. Draw Header (Always redraw to ensure it stays fixed)
+    # Format header, truncate to safe width
+    RAW_HEADER=$(echo "$HEADERS" | awk -F'|' "{printf \"$AWK_FMT\", \$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9}")
+    
+    # Pad the header with spaces to fill the bar
+    # 'printf %-*s' means: print string left-aligned in a field of width N
+    tput cup 0 0
+    printf "${HEADER_BG}${HEADER_FG}%-*.*s${RESET}" "$COLS" "$COLS" "$RAW_HEADER"
+
+    # 3. Fetch Data
+    if [[ $MAX_ROWS -gt 0 ]]; then
+        # Fetch N rows
+        RAW_DATA=$(sqlite3 -separator '|' "$DB_PATH" \
+            "SELECT * FROM ( $QUERY_SQL WHERE id > 0 ORDER BY id DESC LIMIT $MAX_ROWS ) ORDER BY id ASC;")
+    else
+        RAW_DATA=""
     fi
 
+    # 4. Draw Rows
+    # We use mapfile (readarray) to split output into an array safely
+    mapfile -t DATA_ARRAY <<< "$RAW_DATA"
+
+    # Loop through the available screen space (1 to MAX_ROWS)
+    for ((i=0; i<MAX_ROWS; i++)); do
+        # Calculate screen line (Header is 0, so data starts at 1)
+        SCREEN_LINE=$((i + 1))
+        
+        # Get data for this row (if available)
+        ROW_DATA="${DATA_ARRAY[$i]}"
+
+        tput cup $SCREEN_LINE 0
+
+        if [[ -n "$ROW_DATA" ]]; then
+            # Format columns using AWK
+            FORMATTED=$(echo "$ROW_DATA" | awk -F'|' "{printf \"$AWK_FMT\", \$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9}")
+            
+            # PRINTING TRICK:
+            # %-*.*s : Left-align, Pad to Width, Truncate to Width.
+            # This ensures we overwrite previous text completely (no flicker) 
+            # and never exceed line width (no scroll).
+            printf "%-*.*s" "$SAFE_WIDTH" "$SAFE_WIDTH" "$FORMATTED"
+        else
+            # If no data for this row (DB has fewer rows than screen), print empty spaces to clear old data
+            printf "%-*s" "$SAFE_WIDTH" ""
+        fi
+    done
+
+    # 5. Wait
     sleep 1
 done
