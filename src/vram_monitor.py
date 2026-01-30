@@ -11,8 +11,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 # Get logger
-logger = logging.getLogger("proxy")
-
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ModelInfo:

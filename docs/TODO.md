@@ -9,12 +9,18 @@
 - Automated test suite
 - Log analyzer with statistics
 
-### Phase 2: In Progress
-- PostgreSQL logging
-- Docker deployment
-- Prometheus metrics
-- Grafana dashboards
+### Phase 2: Stabilizing
 - Client disconnect detection
+- Fix queue prioritization: Small models must be able to jump ahead of large models (see test_scenario_large_model_deferral)
+- Overhaul test_scenario_priority_reordering: Review and redesign logic to robustly test loaded vs unloaded model queue priority
+- Ensure IP fairness: Requests from new IPs must not be starved by large backlogs from other IPs (see test_scenario_ip_fairness)
+- Review and improve queue penalty/priority logic for both model and IP fairness
+- Improve test coverage
+
+### Phase 3: Deployment
+- Finish Analytics
+- Docker deployment
+- Migration Scripts
 
 ---
 
@@ -48,23 +54,4 @@
 
 ---
 
-### v3.5.0 - Docker & Production Deployment
-
-#### v3.5.1 Docker Configuration
-- [ ] Multi-stage Dockerfile (builder + runtime)
-- [ ] Health check endpoint
-- [ ] Resource limits (CPU/memory)
-- [ ] Environment variable documentation
-
-#### v3.5.2 docker-compose.yml
-- [ ] PostgreSQL service
-- [ ] Proxy service with dependencies
-- [ ] Volume mounts for logs
-- [ ] Network configuration
-
-#### v3.5.3 Deployment Scripts
-- [ ] Deployment checklist
-- [ ] Rollback procedure
-- [ ] Configuration validation
-- [ ] Grafana Monitoring setup guide
 

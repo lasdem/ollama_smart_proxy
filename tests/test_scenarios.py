@@ -1,11 +1,9 @@
 import subprocess
-import signal
 import sys
 import tempfile
 import pytest
 import asyncio
 import httpx
-import pytest
 import time
 import os
 import requests
@@ -16,12 +14,12 @@ class TestConfig:
     OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
     TIMEOUT_DEFAULT = 300.0
     TIMEOUT_HEAVY = 600.0
-    QUEUE_STARTUP_DELAY = 6  # Seconds to wait for queue filling
+
     
     # Define your models here
-    MODEL_STARTUP = "qwen2.5:7b"                        # A standard medium model
-    MODEL_LARGE = "benhaotang/Nanonets-OCR-s:latest"    # High VRAM usage
-    MODEL_MEDIUM = "qwen3-coder:latest"                          # Another medium/small model
+    MODEL_LARGE = "llama3.3:latest"                     # High VRAM usage
+    MODEL_MEDIUM = "qwen3-coder:latest"                 # medium model
+    MODEL_MEDIUM2 = "devstral-small-2:latest"           # Another medium model
     MODEL_SMALL = "gemma3:latest"                       # Low VRAM / Fast
     MODEL_BAD = "this-model-does-not-exist:666"         # For fault tolerance
 
@@ -36,7 +34,6 @@ def start_proxy_service():
     log_file = tempfile.NamedTemporaryFile(delete=False, mode="w+t", suffix="_proxy.log")
     # Use the conda python and run the proxy
     proxy_env = os.environ.copy()
-    proxy_env["QUEUE_STARTUP_DELAY"] = str(TestConfig.QUEUE_STARTUP_DELAY)
     proxy_proc = subprocess.Popen([
         sys.executable, "src/smart_proxy.py"
     ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)), env=proxy_env)
@@ -56,6 +53,8 @@ def start_proxy_service():
         proxy_proc.terminate()
         log_file.seek(0)
         logs = log_file.read()
+        log_file.flush()
+        log_file.close()
         pytest.fail(f"Proxy did not start in time. Log output:\n{logs}")
 
     yield log_file.name
@@ -66,6 +65,8 @@ def start_proxy_service():
         proxy_proc.wait(timeout=10)
     except Exception:
         proxy_proc.kill()
+    # Ensure all output is flushed before closing
+    log_file.flush()
     log_file.close()
 
 @pytest.fixture(scope="function", autouse=True)
@@ -84,17 +85,26 @@ async def unload_all_models():
                 return
 
             print(f"   🧹 Cleanup: Unloading {len(active_models)} models...")
-            
             # 2. Force unload
             for m in active_models:
                 await client.post("/api/chat", json={
                     "model": m['name'],
                     "keep_alive": 0
                 })
-            
-            # 3. Wait for VRAM release
-            await asyncio.sleep(0.2)
-            
+
+            # 3. Wait for VRAM release and verify all models are unloaded
+            for _ in range(30):  # Wait up to 3 seconds total
+                await asyncio.sleep(0.1)
+                try:
+                    ps = await client.get("/api/ps")
+                    still_loaded = ps.json().get('models', [])
+                    if not still_loaded:
+                        print("   ✅ All models unloaded.")
+                        break
+                except Exception:
+                    break  # If Ollama is down, just exit
+            else:
+                print(f"   ⚠️ Models still loaded after cleanup: {[m['name'] for m in still_loaded]}")
     except Exception as e:
         print(f"   ⚠️ Cleanup failed: {e}")
 
@@ -107,14 +117,16 @@ async def test_scenario_same_model_bunching():
     """
     print("\n📋 Scenario 1: Same Model Bunching")
     
-    model_a = TestConfig.MODEL_STARTUP
-    model_b = TestConfig.MODEL_MEDIUM 
+    model_a = TestConfig.MODEL_MEDIUM
+    model_b = TestConfig.MODEL_MEDIUM2 
     n_pairs = 8
     
     completion_order = []
     errors = []
 
     async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_DEFAULT) as client:
+        # Pause queue processing
+        await client.post("/proxy/testing", json={"pause": True})
         # Health Check
         try:
             health = await client.get("/proxy/health")
@@ -140,22 +152,25 @@ async def test_scenario_same_model_bunching():
         for i in range(n_pairs):
             tasks.append(asyncio.create_task(fetch(model_a, i)))
             tasks.append(asyncio.create_task(fetch(model_b, i)))
-        
         print(f"   ⏳ Sending {n_pairs*2} interleaved requests...")
         await asyncio.gather(*tasks)
+
+        # Optionally inspect queue here if needed
+        # Resume processing
+        await client.post("/proxy/testing", json={"pause": False})
+
+        # Wait for completions
+        await asyncio.sleep(0.1 * n_pairs)  # Small wait for processing
 
         # Analysis
         if errors:
             print(f"   ⚠️ Errors: {errors}")
-        
         switches = 0
         for i in range(1, len(completion_order)):
             if completion_order[i] != completion_order[i-1]:
                 switches += 1
-                
         # Assertions
         assert len(completion_order) == n_pairs * 2, "Not all requests completed"
-        # We allow a few switches (<= 4) for race conditions, but it shouldn't be 15 (fully interleaved)
         assert switches <= 4, f"Bunching failed. Expected <=4 switches, got {switches}"
         print(f"   ✅ SUCCESS: Bunched with {switches} switches.")
 
@@ -172,7 +187,8 @@ async def test_scenario_large_model_deferral():
     completion_order = []
     errors = []
 
-    async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_HEAVY) as client:
+    async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_HEAVY) as client, \
+        httpx.AsyncClient(base_url=TestConfig.OLLAMA_API_BASE, timeout=10.0) as ollama_client:
         # Worker
         async def fetch(model, label):
             try:
@@ -189,38 +205,45 @@ async def test_scenario_large_model_deferral():
 
         tasks = []
 
-        # 1. Block Slots
-        print(f"   1️⃣  Blocking with {TestConfig.MODEL_STARTUP}...")
-        for i in range(requests_per_model):
-            tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_STARTUP, "Startup")))
- 
-        # 2. Queue Large (First in line)
-        print(f"   2️⃣  Queuing LARGE ({TestConfig.MODEL_LARGE})...")
+        # 1. Explicitly load both models
+        print(f"   1️⃣  Preloading {TestConfig.MODEL_LARGE} and {TestConfig.MODEL_SMALL}...")
+        await client.post("/v1/chat/completions", json={"model": TestConfig.MODEL_LARGE, "messages": [{"role": "user", "content": "init"}]})
+        await client.post("/v1/chat/completions", json={"model": TestConfig.MODEL_SMALL, "messages": [{"role": "user", "content": "init"}]})
+        
+        # 2. Explicitly unload both models
+        print(f"   2️⃣  Unloading {TestConfig.MODEL_LARGE} and {TestConfig.MODEL_SMALL}...")
+        await ollama_client.post("/api/chat", json={"model": TestConfig.MODEL_LARGE, "keep_alive": 0})
+        await ollama_client.post("/api/chat", json={"model": TestConfig.MODEL_SMALL, "keep_alive": 0})
+        
+        # Pause queue processing
+        await client.post("/proxy/testing", json={"pause": True})
+
+        # 3. Queue Large (First in line)
+        print(f"   3️⃣  Queuing LARGE ({TestConfig.MODEL_LARGE})...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_LARGE, "Large")))
-
-        # 3. Queue Small (Last in line)
-        print(f"   3️⃣  Queuing SMALL ({TestConfig.MODEL_SMALL})...")
+        print(f"   4️⃣  Queuing SMALL ({TestConfig.MODEL_SMALL})...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_SMALL, "Small")))
-
         print("   ⏳ Waiting...")
         await asyncio.gather(*tasks)
-
+        # Inspect queue priorities
+        queue_resp = await client.get("/proxy/queue")
+        queue_data = queue_resp.json()
+        print(f"   🧐 Queue state before processing: {queue_data}")
+        # Resume processing
+        await client.post("/proxy/testing", json={"pause": False})
+        # Wait for completions
+        await asyncio.sleep(1.0)
         if errors:
             pytest.fail(f"Requests failed: {errors}")
-
-        # Assertions
         try:
             first_large_idx = completion_order.index(TestConfig.MODEL_LARGE)
-            # Find last occurrence of Small
             last_small_idx = len(completion_order) - 1 - completion_order[::-1].index(TestConfig.MODEL_SMALL)
         except ValueError:
             pytest.fail("Missing models in response.")
-
-        visual_map = ["LG" if m == TestConfig.MODEL_LARGE else "SM" for m in completion_order if m != TestConfig.MODEL_STARTUP]
+        visual_map = ["LG" if m == TestConfig.MODEL_LARGE else "SM" for m in completion_order]
         print(f"   📊 Stream: {visual_map}")
-
         assert last_small_idx < first_large_idx, "❌ Priority Failed: Large model finished before last Small model."
         print("   ✅ SUCCESS: Small models prioritized.")
 
@@ -251,11 +274,6 @@ async def test_scenario_fault_tolerance():
 
         tasks = []
         
-        # 1. Block
-        for i in range(3):
-            tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_STARTUP, "Startup")))
-        await asyncio.sleep(0.5)
-
         # 2. Bad Request
         print("   Queuing BAD request...")
         tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_BAD, "BAD")))
@@ -283,23 +301,47 @@ async def test_scenario_fault_tolerance():
 async def test_scenario_priority_reordering():
     """
     Scenario 4: Priority Reordering (Loaded vs Unloaded)
-    A request for a CURRENTLY loaded model should jump ahead of a queued unloaded model.
+    1. We need to load a both models first, so the proxy is aware of the VRAM usage.  
+       We'll rely on the fact that the fixtures unload all models before each test.  
+    2. we need to unload the "unloaded" model to ensure it incurs the loading penalty.  
+    3. then we send requests for an unloaded model and a loaded model.  
+    We need to make sure the proxy is still in the startup delay period to ensure queueing works.  
+    Ensures that requests for already loaded models jump ahead of those needing to be loaded.  
     """
     print("\n📋 Scenario 4: Loaded Model Priority")
     
     completion_order = []
     
-    # 1. We need the Startup model to be ALREADY loaded for this test to work best.
-    # We'll rely on the fact that previous tests likely left MODEL_STARTUP or MODEL_SMALL loaded.
-    # Let's use MODEL_STARTUP vs MODEL_LARGE.
-    
-    loaded_model = TestConfig.MODEL_STARTUP
-    unloaded_model = TestConfig.MODEL_LARGE # Something unlikely to be loaded
-    
-    async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_HEAVY) as client:
-        # Pre-load the "Loaded" model just in case
+
+    loaded_model = TestConfig.MODEL_MEDIUM
+    unloaded_model = TestConfig.MODEL_MEDIUM2
+
+    async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_HEAVY) as client, \
+        httpx.AsyncClient(base_url=TestConfig.OLLAMA_API_BASE, timeout=10.0) as ollama_client:
+
+        # 1. Explicitly load both models
+        print(f"   Preloading {loaded_model} and {unloaded_model}...")
+        await client.post("/v1/chat/completions", json={"model": unloaded_model, "messages": [{"role": "user", "content": "init"}]})
         await client.post("/v1/chat/completions", json={"model": loaded_model, "messages": [{"role": "user", "content": "init"}]})
 
+        # 2. Explicitly unload the 'unloaded' model
+        print(f"   Unloading {unloaded_model}...")
+        await ollama_client.post("/api/chat", json={"model": unloaded_model, "keep_alive": 0})
+
+        # 3. Wait for VRAM monitor to reflect only the loaded model
+        print(f"   Waiting for VRAM state: only {loaded_model} loaded...")
+        for _ in range(30):
+            ps = await ollama_client.get("/api/ps")
+            models = ps.json().get('models', [])
+            loaded_names = [m['model'] for m in models]
+            if loaded_model in loaded_names and unloaded_model not in loaded_names:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            pytest.fail(f"VRAM state not as expected. Loaded: {loaded_names}")
+
+        # 4. Queue requests for both models during controlled pause
+        await client.post("/proxy/testing", json={"pause": True})
         async def fetch(model, label):
             resp = await client.post(
                 "/v1/chat/completions",
@@ -307,30 +349,23 @@ async def test_scenario_priority_reordering():
             )
             if resp.status_code == 200:
                 completion_order.append(label)
-
         tasks = []
-        
-        # 1. Block slots
-        for i in range(3):
-            tasks.append(asyncio.create_task(fetch(loaded_model, "Blocker")))
-        await asyncio.sleep(0.5)
-
-        # 2. Queue Unloaded (Should wait)
         print(f"   Queuing Unloaded ({unloaded_model})...")
         tasks.append(asyncio.create_task(fetch(unloaded_model, "Unloaded")))
-        await asyncio.sleep(0.2)
-
-        # 3. Queue Loaded (Should Jump)
         print(f"   Queuing Loaded ({loaded_model})...")
         tasks.append(asyncio.create_task(fetch(loaded_model, "Loaded")))
-
         await asyncio.gather(*tasks)
-
+        # Inspect queue
+        queue_resp = await client.get("/proxy/queue")
+        queue_data = queue_resp.json()
+        print(f"   🧐 Queue state before processing: {queue_data}")
+        # Resume processing
+        await client.post("/proxy/testing", json={"pause": False})
+        await asyncio.sleep(1.0)
         # Check order: Loaded should finish BEFORE Unloaded
         try:
             unloaded_idx = completion_order.index("Unloaded")
             loaded_idx = completion_order.index("Loaded")
-            
             assert loaded_idx < unloaded_idx, "❌ Priority Failed: Loaded model did not jump queue."
             print("   ✅ SUCCESS: Loaded model jumped ahead.")
         except ValueError:
@@ -363,7 +398,7 @@ async def test_scenario_ip_fairness():
                 resp = await client.post(
                     "/v1/chat/completions",
                     json={
-                        "model": TestConfig.MODEL_STARTUP, 
+                        "model": TestConfig.MODEL_MEDIUM, 
                         "messages": [{"role": "user", "content": "Hi"}], 
                         "stream": False
                     },

@@ -18,7 +18,7 @@ class RequestLogRepository:
     """Repository for request log data access"""
     
     def __init__(self):
-        self.db = get_db()
+        self.db = get_db() 
     
     def create_request_log(self, request_data: Dict[str, Any]) -> RequestLog:
         """
@@ -30,9 +30,8 @@ class RequestLogRepository:
         Returns:
             RequestLog: Created request log object
         """
+        session = self.db.get_session()
         try:
-            session = self.db.get_session()
-            
             # Create request log
             request_log = RequestLog(
                 request_id=request_data.get('request_id'),
@@ -43,31 +42,18 @@ class RequestLogRepository:
                 status=request_data.get('status'),
                 priority_score=request_data.get('priority_score')
             )
-            
             session.add(request_log)
             session.commit()
             session.refresh(request_log)
-            
             return request_log
         except Exception as e:
             session.rollback()
             logger.error(f"Failed to create request log: {e}")
-            
             # Fallback to file-based logging
             request_data['created_at'] = datetime.utcnow().isoformat()
             self.db.write_to_fallback_file(request_data)
-            
-            # Return a mock object to indicate the request was logged (to fallback)
-            return RequestLog(
-                request_id=request_data.get('request_id'),
-                source_ip=request_data.get('source_ip'),
-                model_name=request_data.get('model_name'),
-                prompt_text=request_data.get('prompt_text'),
-                timestamp_received=request_data.get('timestamp_received'),
-                status=request_data.get('status'),
-                priority_score=request_data.get('priority_score'),
-                created_at=datetime.utcnow()
-            )
+            # Re-raise so tests can catch
+            raise
         finally:
             session.close()
     

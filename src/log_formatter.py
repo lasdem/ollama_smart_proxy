@@ -252,11 +252,17 @@ def setup_logging(level: str = "INFO", access_level: str = None):
         for h in l.handlers[:]:
             l.removeHandler(h)
 
-    # LiteLLM -> Propagate to Root
-    for name in ["litellm", "litellm.proxy", "litellm.auth", "litellm.usage", "litellm.cache", "litellm.telemetry"]:
+    # LiteLLM -> Silence INFO logs, only show WARNING/ERROR
+    # Added "LiteLLM" (capitalized) which is the source of the duplication
+    litellm_loggers = [
+        "litellm", "LiteLLM", "litellm.proxy", "litellm.auth", 
+        "litellm.usage", "litellm.cache", "litellm.telemetry"
+    ]
+    for name in litellm_loggers:
         l = logging.getLogger(name)
-        l.setLevel(log_level)
+        l.setLevel(logging.WARNING) # Force this to WARNING to kill the spam
         l.propagate = True
+        # Remove the default handler LiteLLM adds (kills the first duplicate line)
         for h in l.handlers[:]:
             l.removeHandler(h)
 

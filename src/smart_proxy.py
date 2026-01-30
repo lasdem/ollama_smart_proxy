@@ -14,7 +14,7 @@ from datetime import datetime
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 import litellm
 from litellm import acompletion
@@ -51,18 +51,18 @@ OLLAMA_MAX_PARALLEL = int(os.getenv("OLLAMA_MAX_PARALLEL", "3"))
 VRAM_POLL_INTERVAL = int(os.getenv("VRAM_POLL_INTERVAL", "5"))
 
 # Priority Scoring (0 = highest priority, higher numbers = lower priority)
-PRIORITY_BASE_LOADED = int(os.getenv("PRIORITY_BASE_LOADED", "0"))          # Model already loaded
-PRIORITY_BASE_PARALLEL = int(os.getenv("PRIORITY_BASE_PARALLEL", "150"))    # Can fit in parallel
-PRIORITY_BASE_SMALL_SWAP = int(os.getenv("PRIORITY_BASE_SMALL_SWAP", "300")) # Small model swap
-PRIORITY_BASE_LARGE_SWAP = int(os.getenv("PRIORITY_BASE_LARGE_SWAP", "500")) # Large model swap (>50GB)
+PRIORITY_BASE_LOADED = int(os.getenv("PRIORITY_BASE_LOADED", "100"))          # Model already loaded
+PRIORITY_BASE_PARALLEL = int(os.getenv("PRIORITY_BASE_PARALLEL", "200"))      # Can fit in parallel
+PRIORITY_BASE_SMALL_SWAP = int(os.getenv("PRIORITY_BASE_SMALL_SWAP", "400"))  # Small model swap
+PRIORITY_BASE_LARGE_SWAP = int(os.getenv("PRIORITY_BASE_LARGE_SWAP", "800"))  # Large model swap
+PRIORITY_BASE_LARGE_SWAP_THRESHOLD_GB = int(os.getenv("PRIORITY_BASE_LARGE_SWAP_THRESHOLD_GB", "40"))  
 
 # Priority Modifiers (additive)
 PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))  # -1 per sec (higher priority)
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per queued + recent (combined max 100)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
-# Add QUEUE_STARTUP_DELAY for test queue filling
-QUEUE_STARTUP_DELAY = int(os.getenv("QUEUE_STARTUP_DELAY", "0"))
+
 
 litellm.drop_params = True
 
@@ -197,7 +197,7 @@ class RequestTracker:
         else:
             # Requires swapping out current model
             model_vram = self.get_vram_for_model(model)
-            if model_vram and model_vram > (50 * 1024 * 1024 * 1024):  # >50GB
+            if model_vram and model_vram > (PRIORITY_BASE_LARGE_SWAP_THRESHOLD_GB * 1024 * 1024 * 1024):  
                 # Large model requiring swap (EXPENSIVE)
                 score = PRIORITY_BASE_LARGE_SWAP  # 500
             else:
@@ -219,11 +219,12 @@ class RequestTracker:
         # Never go below 0
         return max(0, score)
 
+
 # Global state
 vram_monitor = VRAMMonitor(OLLAMA_API_BASE, VRAM_POLL_INTERVAL)
 tracker = RequestTracker(vram_monitor)
 request_queue: List[QueuedRequest] = []
-active_requests: Dict[str, QueuedRequest] = {} 
+active_requests: Dict[str, QueuedRequest] = {}
 queue_lock = asyncio.Lock()
 request_counter = 0
 counter_lock = asyncio.Lock()
@@ -233,6 +234,16 @@ stats = {
     "failed_requests": 0,
     "queue_depth_max": 0
 }
+
+# --- TESTING PAUSE/RESUME CONTROL ---
+queue_processing_paused = False
+
+def set_queue_processing_paused(paused: bool):
+    global queue_processing_paused
+    queue_processing_paused = paused
+
+def is_queue_processing_paused():
+    return queue_processing_paused
 
 def generate_request_id(ip: str, model: str) -> str:
     """Generate unique request ID: REQ{counter:04d}_{ip}_{model}_{hash:4}"""
@@ -397,38 +408,49 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
 
 async def queue_worker():
     logger.info("Queue worker started", extra={"event": "proxy_startup"})
-    # Startup delay for test queue filling
-    if QUEUE_STARTUP_DELAY > 0:
-        logger.info(f"Queue worker startup delay: {QUEUE_STARTUP_DELAY}s", extra={"event": "startup_delay"})
-        await asyncio.sleep(QUEUE_STARTUP_DELAY)
+
     while True:
+        if is_queue_processing_paused():
+            await asyncio.sleep(0.05)
+            continue
         if tracker.active_request_count >= OLLAMA_MAX_PARALLEL:
             await asyncio.sleep(0.1)
             continue
-        
         async with queue_lock:
             if not request_queue:
                 await asyncio.sleep(0.05)
                 continue
-            
             # Recalculate priorities
             priorities = [(tracker.calculate_priority(req), idx, req) 
                          for idx, req in enumerate(request_queue)]
             priorities.sort(key=lambda x: x[0])
             priority_score, idx, selected_request = priorities[0]
-            
             # Remove from waiting queue
             request_queue.pop(idx)
-            
-            # --- ADD THIS: Track as active ---
             active_requests[selected_request.request_id] = selected_request
-            # -------------------------------
-            
-            vram_info = ""
-            # ... (rest of the logging logic) ...
-            
+            # Get current state for logging
+            is_loaded = tracker.is_model_loaded(selected_request.model_name)
+            ip_queued = tracker.get_queued_count(selected_request.ip)
+            ip_recent = tracker.count_recent_requests(selected_request.ip, RATE_LIMIT_WINDOW)
+            wait_time = int(time.time() - selected_request.timestamp)
+            model_vram = tracker.get_vram_for_model(selected_request.model_name)
+            logger.info(
+                f"[{selected_request.request_id}]",
+                extra={
+                    "event": "request_processing",
+                    "request_id": selected_request.request_id,
+                    "ip": selected_request.ip,
+                    "model": selected_request.model_name,
+                    "priority": priority_score,
+                    "queue_depth": len(request_queue),
+                    "vram_gb": model_vram/(1024*1024*1024) if model_vram else None,
+                    "loaded": is_loaded,
+                    "ip_queued": ip_queued,
+                    "ip_recent": ip_recent,
+                    "wait_seconds": wait_time
+                }
+            )
             tracker.add_request(selected_request.ip, selected_request.model_name)
-        
         # Start processing
         asyncio.create_task(process_request(selected_request, priority_score))
 
@@ -691,7 +713,7 @@ async def proxy_catch_all(request: Request, path: str):
     if request.url.query:
         target_url += f"?{request.url.query}"
 
-    logger.info(f"Proxying generic request: {request.method} {path} -> {target_url}")
+    logger.debug(f"Proxying generic request: {request.method} {path} -> {target_url}")
 
     # 2. Filter headers
     # We generally want to forward headers, but 'host' should be strictly
@@ -732,13 +754,31 @@ async def proxy_catch_all(request: Request, path: str):
         logger.error(f"Proxy error for {path}: {str(e)}")
         raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
 
+
+# --- TESTING ENDPOINT: PAUSE/RESUME QUEUE PROCESSING ---
+@app.post("/proxy/testing")
+async def proxy_testing_control(
+    pause: Optional[bool] = Body(...)
+):
+    """
+    POST /proxy/testing
+    {"pause": true}  -> Pauses queue processing
+    {"pause": false} -> Resumes queue processing
+    Returns current state.
+    """
+    set_queue_processing_paused(bool(pause))
+    return {
+        "paused": is_queue_processing_paused()
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     
     # Use minimal logging config - our setup_logging() already configured everything
     log_config = {
         "version": 1,
-        "disable_existing_loggers": True,
+        "disable_existing_loggers": False,
         "formatters": {
             "default": {"format": "%(message)s"},
             "access": {
