@@ -2,11 +2,32 @@ import subprocess
 import signal
 import sys
 import tempfile
-
-# This fixture starts the proxy in the background and captures logs for all tests
 import pytest
+import asyncio
+import httpx
+import pytest
+import time
+import os
+import requests
 
-@pytest.fixture(scope="session", autouse=True)
+# --- CONFIGURATION ---
+class TestConfig:
+    PROXY_URL = "http://localhost:8003"
+    OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    TIMEOUT_DEFAULT = 300.0
+    TIMEOUT_HEAVY = 600.0
+    QUEUE_STARTUP_DELAY = 6  # Seconds to wait for queue filling
+    
+    # Define your models here
+    MODEL_STARTUP = "qwen2.5:7b"                        # A standard medium model
+    MODEL_LARGE = "benhaotang/Nanonets-OCR-s:latest"    # High VRAM usage
+    MODEL_MEDIUM = "qwen3-coder:latest"                          # Another medium/small model
+    MODEL_SMALL = "gemma3:latest"                       # Low VRAM / Fast
+    MODEL_BAD = "this-model-does-not-exist:666"         # For fault tolerance
+
+# ---------------------
+
+@pytest.fixture(scope="function", autouse=True)
 def start_proxy_service():
     """
     Start the proxy service in the background before any tests run, and stop it after all tests complete.
@@ -14,13 +35,13 @@ def start_proxy_service():
     """
     log_file = tempfile.NamedTemporaryFile(delete=False, mode="w+t", suffix="_proxy.log")
     # Use the conda python and run the proxy
+    proxy_env = os.environ.copy()
+    proxy_env["QUEUE_STARTUP_DELAY"] = str(TestConfig.QUEUE_STARTUP_DELAY)
     proxy_proc = subprocess.Popen([
         sys.executable, "src/smart_proxy.py"
-    ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)))
+    ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)), env=proxy_env)
 
     # Wait for proxy to be ready (poll health endpoint)
-    import time as _time
-    import requests
     ready = False
     for _ in range(60):
         try:
@@ -30,7 +51,7 @@ def start_proxy_service():
                 break
         except Exception:
             pass
-        _time.sleep(0.5)
+        time.sleep(0.5)
     if not ready:
         proxy_proc.terminate()
         log_file.seek(0)
@@ -46,66 +67,8 @@ def start_proxy_service():
     except Exception:
         proxy_proc.kill()
     log_file.close()
-    
-import asyncio
-import httpx
-import pytest
-import time
-import os
 
-# --- CONFIGURATION ---
-class TestConfig:
-    PROXY_URL = "http://localhost:8003"
-    OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE") or os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    TIMEOUT_DEFAULT = 300.0
-    TIMEOUT_HEAVY = 600.0
-    
-    # Define your models here
-    MODEL_STARTUP = "qwen2.5:7b"                        # A standard medium model
-    MODEL_LARGE = "benhaotang/Nanonets-OCR-s:latest"    # High VRAM usage
-    MODEL_MEDIUM = "magistral"                          # Another medium/small model
-    MODEL_SMALL = "gemma3:latest"                       # Low VRAM / Fast
-    MODEL_BAD = "this-model-does-not-exist:666"         # For fault tolerance
-
-# ---------------------
-
-# --- HELPERS ---
-
-async def wait_for_proxy_idle():
-    """
-    Polls the proxy until Queue Depth and Active Requests are both 0.
-    Timeout: 60 seconds.
-    """
-    max_retries = 120
-    async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=5.0) as client:
-        for i in range(max_retries):
-            try:
-                # Try both endpoints just in case
-                try:
-                    resp = await client.get("/proxy/health")
-                except httpx.HTTPStatusError:
-                    resp = await client.get("/health")
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Check both queue and active slots
-                    # Note: Handle cases where keys might be nested differently based on your specific proxy version
-                    queue = data.get("queue_depth", 0)
-                    active = data.get("active_requests", 0)
-                    
-                    if queue == 0 and active == 0:
-                        if i > 0:
-                            print(f"   ✓ Proxy drained successfully (waited {i*0.5}s)")
-                        return True
-            except Exception:
-                # Proxy might be temporarily unresponsive under load
-                pass
-            
-            await asyncio.sleep(0.5)
-    
-    print("   ⚠️ WARNING: Proxy did not drain in 10s! Future tests might fail.")
-    return False
-
+@pytest.fixture(scope="function", autouse=True)
 async def unload_all_models():
     """Helper to force unload all models from VRAM via Ollama API"""
     try:
@@ -135,27 +98,7 @@ async def unload_all_models():
     except Exception as e:
         print(f"   ⚠️ Cleanup failed: {e}")
 
-# --- FIXTURE ---
-
-@pytest.fixture(autouse=True)
-async def reset_system_state():
-    """
-    Ran automatically before EVERY test.
-    1. Waits for Proxy to be idle.
-    2. Clears VRAM in Ollama.
-    """
-    # 1. Wait for Proxy to finish previous tasks
-    is_idle = await wait_for_proxy_idle()
-    if not is_idle:
-        pytest.fail("Proxy is stuck with active requests! Restart the proxy service.")
-
-    # 2. Clear VRAM to ensure "Fresh Start" for priority logic
-    await unload_all_models()
-    
-    yield
-
-# ---------------------
-
+# --- TEST SCENARIOS ---
 @pytest.mark.asyncio
 async def test_scenario_same_model_bunching():
     """
@@ -166,7 +109,7 @@ async def test_scenario_same_model_bunching():
     
     model_a = TestConfig.MODEL_STARTUP
     model_b = TestConfig.MODEL_MEDIUM 
-    n_pairs = 4 # 16 requests total
+    n_pairs = 8
     
     completion_order = []
     errors = []

@@ -33,6 +33,9 @@ from data_access import (
     init_repositories
 )
 
+from enum import Enum
+import json
+
 # Setup logging
 LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -58,31 +61,24 @@ PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per queued + recent (combined max 100)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
-litellm.drop_params = True
+# Add QUEUE_STARTUP_DELAY for test queue filling
+QUEUE_STARTUP_DELAY = int(os.getenv("QUEUE_STARTUP_DELAY", "0"))
 
-# Global request counter
-request_counter = 0
-counter_lock = asyncio.Lock()
+litellm.drop_params = True
 
 # Initialize database and repositories
 init_db()
 init_repositories()
 
+load_dotenv()
+
 request_repo = get_request_log_repo()
 
-def generate_request_id(ip: str, model: str) -> str:
-    """Generate unique request ID: REQ{counter:04d}_{ip}_{model}_{hash:4}"""
-    global request_counter
-    
-    # Generate 4-char hash from timestamp + random
-    hash_input = f"{time.time()}{random.random()}".encode()
-    hash_4char = hashlib.md5(hash_input).hexdigest()[:4]
-    
-    req_id = f"REQ{request_counter:04d}_{ip}_{model}_{hash_4char}"
-    request_counter += 1
-    
-    return req_id
-
+class EndpointType(Enum):
+    OLLAMA_CHAT = "ollama_chat"       # /api/chat
+    OLLAMA_GENERATE = "ollama_gen"    # /api/generate
+    OPENAI_CHAT = "openai_chat"       # /v1/chat/completions
+    OPENAI_LEGACY = "openai_legacy"   # /v1/completions
 
 @dataclass
 class QueuedRequest:
@@ -92,6 +88,7 @@ class QueuedRequest:
     model_name: str
     body: dict
     future: asyncio.Future
+    endpoint_type: EndpointType
     
     def __repr__(self):
         wait_time = int(time.time() - self.timestamp)
@@ -222,13 +219,14 @@ class RequestTracker:
         # Never go below 0
         return max(0, score)
 
-
 # Global state
 vram_monitor = VRAMMonitor(OLLAMA_API_BASE, VRAM_POLL_INTERVAL)
 tracker = RequestTracker(vram_monitor)
 request_queue: List[QueuedRequest] = []
 active_requests: Dict[str, QueuedRequest] = {} 
 queue_lock = asyncio.Lock()
+request_counter = 0
+counter_lock = asyncio.Lock()
 stats = {
     "total_requests": 0,
     "completed_requests": 0,
@@ -236,9 +234,173 @@ stats = {
     "queue_depth_max": 0
 }
 
+def generate_request_id(ip: str, model: str) -> str:
+    """Generate unique request ID: REQ{counter:04d}_{ip}_{model}_{hash:4}"""
+    global request_counter
+    
+    # Generate 4-char hash from timestamp + random
+    hash_input = f"{time.time()}{random.random()}".encode()
+    hash_4char = hashlib.md5(hash_input).hexdigest()[:4]
+    
+    req_id = f"REQ{request_counter:04d}_{ip}_{model}_{hash_4char}"
+    request_counter += 1
+    
+    return req_id
+
+def format_output(response, stream: bool, endpoint_type: EndpointType):
+    """
+    Takes the standardized LiteLLM response and formats it 
+    according to the endpoint that was called.
+    """
+    
+    # --- STREAMING RESPONSE ---
+    if stream:
+        async def iterator():
+            async for chunk in response:
+                # Extract content delta
+                content = chunk.choices[0].delta.content or ""
+                
+                if endpoint_type == EndpointType.OLLAMA_GENERATE:
+                    # OLLAMA RAW FORMAT: JSON objects separated by newlines
+                    yield json.dumps({
+                        "model": chunk.model,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "response": content,
+                        "done": False
+                    }) + "\n"
+                    
+                elif endpoint_type == EndpointType.OLLAMA_CHAT:
+                    # OLLAMA CHAT FORMAT
+                    yield json.dumps({
+                        "model": chunk.model,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "message": {"role": "assistant", "content": content},
+                        "done": False
+                    }) + "\n"
+                    
+                else: 
+                    # OPENAI FORMAT: "data: {JSON} \n\n"
+                    yield f"data: {chunk.json()}\n\n"
+            
+            # End of stream markers
+            if endpoint_type in [EndpointType.OLLAMA_GENERATE, EndpointType.OLLAMA_CHAT]:
+                yield json.dumps({"done": True, "total_duration": 0}) + "\n"
+            else:
+                yield "data: [DONE]\n\n"
+
+        media_type = "application/x-ndjson" if "ollama" in endpoint_type.value else "text/event-stream"
+        return StreamingResponse(iterator(), media_type=media_type)
+
+    # --- NON-STREAMING RESPONSE ---
+    else:
+        # Extract full content
+        full_content = response.choices[0].message.content
+        
+        if endpoint_type == EndpointType.OLLAMA_GENERATE:
+            # Convert to Ollama /api/generate format
+            return JSONResponse({
+                "model": response.model,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "response": full_content,
+                "done": True,
+                "context": [] # LiteLLM doesn't easily return context ints, mostly unused now
+            })
+            
+        elif endpoint_type == EndpointType.OLLAMA_CHAT:
+            # Convert to Ollama /api/chat format
+            return JSONResponse({
+                "model": response.model,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "message": {"role": "assistant", "content": full_content},
+                "done": True
+            })
+            
+        else:
+            # Return OpenAI standard format directly
+            return JSONResponse(content=response.model_dump())
+
+async def enqueue_request(request: Request, endpoint_type: EndpointType):
+    """Shared logic for all endpoints to handle validation, logging, and queuing"""
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    
+    model_name = body.get('model')
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Missing model field")
+    
+    client_ip = request.client.host
+    
+    # Generate ID
+    async with counter_lock:
+        req_id = generate_request_id(client_ip, model_name)
+    
+    # Mark for IP limits
+    tracker.mark_request_queued(client_ip)
+    
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    
+    queued_req = QueuedRequest(
+        request_id=req_id,
+        timestamp=time.time(),
+        ip=client_ip,
+        model_name=model_name,
+        body=body,
+        future=future,
+        endpoint_type=endpoint_type # <--- Store the type
+    )
+    
+    # Extract prompt for logging based on type
+    prompt_text = "N/A"
+    if "messages" in body:
+        msgs = body['messages']
+        if msgs and isinstance(msgs, list):
+            prompt_text = str(msgs[0].get('content', '')) if isinstance(msgs[0], dict) else str(msgs[0])
+    elif "prompt" in body:
+        prompt_text = str(body['prompt'])
+
+    priority_score = tracker.calculate_priority(queued_req)
+    
+    # Log to DB
+    await asyncio.to_thread(
+        request_repo.log_request,
+        req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text
+    )
+    
+    async with queue_lock:
+        request_queue.append(queued_req)
+        stats["total_requests"] += 1
+    
+    logger.info(f"[{req_id}] Queued via {endpoint_type.value}", extra={"event": "queued"})
+    
+    # Wait for the Worker to process it
+    try:
+        response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
+        return response_data, body.get('stream', False)
+    except asyncio.TimeoutError as e:
+        # Clean up active_requests and slot in case of timeout
+        async with queue_lock:
+            # Find and remove from active_requests if present
+            if req_id in active_requests:
+                del active_requests[req_id]
+        tracker.remove_request(client_ip, model_name)
+        raise HTTPException(status_code=504, detail="Request timeout")
+    except Exception as e:
+        # Clean up on any other error
+        async with queue_lock:
+            if req_id in active_requests:
+                del active_requests[req_id]
+        tracker.remove_request(client_ip, model_name)
+        raise
 
 async def queue_worker():
     logger.info("Queue worker started", extra={"event": "proxy_startup"})
+    # Startup delay for test queue filling
+    if QUEUE_STARTUP_DELAY > 0:
+        logger.info(f"Queue worker startup delay: {QUEUE_STARTUP_DELAY}s", extra={"event": "startup_delay"})
+        await asyncio.sleep(QUEUE_STARTUP_DELAY)
     while True:
         if tracker.active_request_count >= OLLAMA_MAX_PARALLEL:
             await asyncio.sleep(0.1)
@@ -270,70 +432,80 @@ async def queue_worker():
         # Start processing
         asyncio.create_task(process_request(selected_request, priority_score))
 
-
 async def process_request(request: QueuedRequest, priority_score: int):
     start_time = time.time()
-    # queue_worker adds to recently_started, so this might be True even if not fully in VRAM yet
-    # We capture this to decide if we need to force a VRAM poll later
     model_was_loaded = tracker.is_model_loaded(request.model_name)
     
-    # Log that processing has started
+    # Calculate initial queue wait
     queue_wait = start_time - request.timestamp
+
+    # Log processing start
     await asyncio.to_thread(
         request_repo.log_request,
         request.request_id,
         request.ip,
         request.model_name,
         "processing",
-        0,  # duration will be updated later
+        0, 
         priority_score,
         timestamp_started=datetime.utcnow(),
         queue_wait_seconds=queue_wait
     )
     
     try:
+        # 1. Normalize Model Name
         model = request.model_name
         if not model.startswith("ollama/"):
             model = f"ollama/{model}"
-        
+            
         should_stream = request.body.get('stream', False)
         
-        # Start the request
-        response = await acompletion(
-            model=model,
-            messages=request.body.get('messages'),
-            stream=should_stream,
-            api_base=OLLAMA_API_BASE,
-            timeout=REQUEST_TIMEOUT
-        )
+        # 2. Normalize Input for LiteLLM
+        req_kwargs = {
+            "model": model,
+            "stream": should_stream,
+            "api_base": OLLAMA_API_BASE,
+            "timeout": REQUEST_TIMEOUT
+        }
         
-        # Capture response text for non-streaming responses
+        if request.endpoint_type in [EndpointType.OLLAMA_GENERATE, EndpointType.OPENAI_LEGACY]:
+            # Raw generation request
+            if 'prompt' in request.body:
+                req_kwargs['messages'] = [{"role": "user", "content": request.body['prompt']}]
+            else:
+                req_kwargs['messages'] = [{"role": "user", "content": ""}]
+        else:
+            # Chat request
+            req_kwargs['messages'] = request.body.get('messages', [])
+
+        # 3. Execute
+        response = await acompletion(**req_kwargs)
+
+        # Extract response text for logging (non-streaming only)
         response_text = None
         if not should_stream:
-            response_text = response.choices[0].message.content if response.choices else None
+            # LiteLLM standardizes responses to have choices[0].message.content
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                response_text = response.choices[0].message.content
         
-        # If model wasn't loaded before, trigger immediate VRAM poll after brief delay
+        # If model wasn't loaded before, trigger immediate VRAM poll
         if not model_was_loaded:
             async def delayed_poll():
                 await asyncio.sleep(1.0)
                 await vram_monitor.poll_now()
                 logger.info(
                     f"[{request.request_id}]",
-                    extra={
-                        "event": "vram_poll",
-                        "request_id": request.request_id,
-                        "model": request.model_name
-                    }
+                    extra={"event": "vram_poll", "request_id": request.request_id}
                 )
-            
             asyncio.create_task(delayed_poll())
         
+        # 4. Set Result
         request.future.set_result(response)
         stats["completed_requests"] += 1
         duration = time.time() - start_time
         processing_time = duration - queue_wait
         
-        # Log to database
+        # Log completion
         await asyncio.to_thread(
             request_repo.log_request,
             request.request_id,
@@ -342,7 +514,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
             "completed",
             duration,
             priority_score,
-            response_text=response_text,
+            response_text=response_text, 
             processing_time_seconds=processing_time
         )
         
@@ -351,19 +523,15 @@ async def process_request(request: QueuedRequest, priority_score: int):
             extra={
                 "event": "request_completed",
                 "request_id": request.request_id,
-                "ip": request.ip,
-                "model": request.model_name,
                 "duration_seconds": round(duration, 2)
             }
         )
-        # -------------------------------
         
     except Exception as e:
         duration = time.time() - start_time
         queue_wait = start_time - request.timestamp
         processing_time = duration - queue_wait
         
-        # Log error to database
         await asyncio.to_thread(
             request_repo.log_request,
             request.request_id,
@@ -375,15 +543,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
             processing_time_seconds=processing_time
         )
         
-        logger.exception(
-            f"[{request.request_id}]",
-            extra={
-                "event": "request_failed",
-                "request_id": request.request_id,
-                "ip": request.ip,
-                "model": request.model_name,
-            }
-        )
+        logger.exception(f"[{request.request_id}] Request Failed")
         request.future.set_exception(e)
         stats["failed_requests"] += 1
     finally:
@@ -391,7 +551,6 @@ async def process_request(request: QueuedRequest, priority_score: int):
             if request.request_id in active_requests:
                 del active_requests[request.request_id]
         tracker.remove_request(request.ip, request.model_name)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -421,95 +580,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ollama Smart Proxy", version="3.2", lifespan=lifespan)
 
-
 @app.post("/api/chat")
-@app.post("/chat/completions")
+async def handle_ollama_chat(request: Request):
+    response, stream = await enqueue_request(request, EndpointType.OLLAMA_CHAT)
+    return format_output(response, stream, EndpointType.OLLAMA_CHAT)
+
+@app.post("/api/generate")
+async def handle_ollama_gen(request: Request):
+    response, stream = await enqueue_request(request, EndpointType.OLLAMA_GENERATE)
+    return format_output(response, stream, EndpointType.OLLAMA_GENERATE)
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: Request):
-    try:
-        body = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
-    
-    model_name = body.get('model')
-    if not model_name:
-        raise HTTPException(status_code=400, detail="Missing model field")
-    
-    client_ip = request.client.host
-    should_stream = body.get('stream', False)
-    
-    # Generate unique request ID
-    async with counter_lock:
-        req_id = generate_request_id(client_ip, model_name)
-    
-    # Mark as queued for IP tracking BEFORE adding to queue
-    tracker.mark_request_queued(client_ip)
-    
-    loop = asyncio.get_running_loop()
-    future = loop.create_future()
-    
-    queued_request = QueuedRequest(
-        request_id=req_id,
-        timestamp=time.time(),
-        ip=client_ip,
-        model_name=model_name,
-        body=body,
-        future=future
-    )
-    
-    # Calculate priority score for logging
-    priority_score = tracker.calculate_priority(queued_request)
-    
-    # Log request to database when queued
-    prompt_text = None
-    if 'messages' in body:
-        messages = body['messages']
-        if isinstance(messages, list) and len(messages) > 0:
-            prompt_text = messages[0].get('content', '') if isinstance(messages[0], dict) else str(messages[0])
-    
-    await asyncio.to_thread(
-        request_repo.log_request,
-        req_id,
-        client_ip,
-        model_name,
-        "queued",
-        0,  # duration will be updated later
-        priority_score,
-        prompt_text=prompt_text
-    )
-    
-    # Add request to queue
-    async with queue_lock:
-        request_queue.append(queued_request)
-        stats["total_requests"] += 1
-        stats["queue_depth_max"] = max(stats["queue_depth_max"], len(request_queue))
-    
-    logger.info(
-        f"[{req_id}]",
-        extra={
-            "event": "request_queued",
-            "request_id": req_id,
-            "ip": client_ip,
-            "model": model_name,
-            "queue_depth": len(request_queue)
-        }
-    )
-    
-    try:
-        response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Request timeout")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    if should_stream:
-        async def iterator():
-            async for chunk in response_data:
-                yield f"data: {chunk.json()}\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(iterator(), media_type="text/event-stream")
-    else:
-        return JSONResponse(content=response_data.model_dump())
+async def handle_openai_chat(request: Request):
+    response, stream = await enqueue_request(request, EndpointType.OPENAI_CHAT)
+    return format_output(response, stream, EndpointType.OPENAI_CHAT)
+
+@app.post("/v1/completions")
+async def handle_openai_legacy(request: Request):
+    response, stream = await enqueue_request(request, EndpointType.OPENAI_LEGACY)
+    return format_output(response, stream, EndpointType.OPENAI_LEGACY)
 
 
 @app.get("/proxy/health")
