@@ -1,0 +1,190 @@
+services:
+  ollama:
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      # device_ids: ['GPU-b8bfebc5-f03c-45ae-e042-65fcdce60697']
+                      device_ids: ['GPU-2cbcf4c0-0c64-2609-263c-f90706b9b649']
+                      capabilities: [gpu]
+    volumes:
+      - ollama:/root/.ollama
+    container_name: ollama
+    pull_policy: always
+    tty: true
+    restart: unless-stopped
+    image: ollama/ollama:${OLLAMA_DOCKER_TAG-latest}
+    environment:
+      - OLLAMA_HOST="0.0.0.0"
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS-1}
+      - OLLAMA_NUM_CTX=${OLLAMA_NUM_CTX}
+      - HTTP_PROXY=${PAYSAFE_PROXY}
+      - HTTPS_PROXY=${PAYSAFE_PROXY}
+      - NO_PROXY=${PAYSAFE_NO_PROXY}
+      - http_proxy=${PAYSAFE_PROXY}
+      - https_proxy=${PAYSAFE_PROXY}
+      - no_proxy=${PAYSAFE_NO_PROXY}
+#    ports:
+#      - ${OLLAMA_WEBAPI_PORT-11434}:11434
+    networks:
+      - ollama-network
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+
+  ollama-proxy:
+    image: ollama-smart-proxy:local    # Matches your manual build tag
+    container_name: ollama-proxy
+    pull_policy: never           # CRITICAL: Do not try to pull from DockerHub
+    volumes:
+      # Persist database and logs
+      - ./db:/app/db
+    restart: unless-stopped
+    ports:
+      # The proxy takes over the public port (Host:11434 -> Proxy:8080)
+      - ${OLLAMA_WEBAPI_PORT-11434}:8080 
+    networks:
+      - ollama-network
+    environment:
+      # Tell your proxy code where the real Ollama is (internal hostname)
+      - OLLAMA_API_BASE=http://ollama:11434 
+      - PROXY_PORT=8080
+      - REQUEST_TIMEOUT=1200
+      - LOG_FORMAT=json # Options: json, human
+      - LOG_LEVEL=INFO
+      - ACCESS_LOG_LEVEL=WARNING
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/proxy/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+
+  mcpo:
+    image: ghcr.io/open-webui/mcpo:${MCPO_DOCKER_TAG-main}
+    container_name: mcpo
+    volumes:
+      - '/data/gpuserver1/docker/mounts/open_webui/mcpo/config.json:/app/config/config.json'
+    ports:
+      - ${MCPO_API_PORT-8000}:8000
+    networks:
+      - ollama-network
+    environment:
+      - HTTP_PROXY=${PAYSAFE_PROXY}
+      - HTTPS_PROXY=${PAYSAFE_PROXY}
+      - NO_PROXY=${PAYSAFE_NO_PROXY}
+      - http_proxy=${PAYSAFE_PROXY}
+      - https_proxy=${PAYSAFE_PROXY}
+      - no_proxy=${PAYSAFE_NO_PROXY}
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+    command: >
+      --api-key ${MCPO_API_SECRET}
+      --config /app/config/config.json
+
+  searxng:
+    container_name: searxng
+    image: searxng/searxng:latest
+    volumes:
+      - '/data/gpuserver1/docker/mounts/open_webui/searxng:/etc/searxng:rw'
+    ports:
+      - "8080:8080"
+    networks:
+      - ollama-network
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080
+      - SEARXNG_BIND_ADDRESS=0.0.0.0
+      - SEARXNG_PORT=8080
+      - SEARXNG_SECRET=${SEARXNG_SECRET}
+      - HTTP_PROXY=${PAYSAFE_PROXY}
+      - HTTPS_PROXY=${PAYSAFE_PROXY}
+      - NO_PROXY=${PAYSAFE_NO_PROXY}
+      - http_proxy=${PAYSAFE_PROXY}
+      - https_proxy=${PAYSAFE_PROXY}
+      - no_proxy=${PAYSAFE_NO_PROXY}
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+
+  open-webui: 
+    deploy:
+        resources:
+            reservations:
+                devices:
+                    - driver: nvidia
+                      # device_ids: ['GPU-b8bfebc5-f03c-45ae-e042-65fcdce60697']
+                      device_ids: ['GPU-2cbcf4c0-0c64-2609-263c-f90706b9b649']
+                      capabilities: [gpu]
+    image: ghcr.io/open-webui/open-webui:${WEBUI_DOCKER_TAG-main}
+    container_name: open-webui
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      - ollama
+      - mcpo
+      - searxng
+    ports:
+      - ${OPEN_WEBUI_PORT-3000}:8080
+    networks:
+      - ollama-network
+      - comfyui_openwebui-bridge
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - OLLAMA_BASE_URL=http://ollama-proxy:8080
+      - HTTP_PROXY=${PAYSAFE_PROXY}
+      - HTTPS_PROXY=${PAYSAFE_PROXY}
+      - NO_PROXY=${PAYSAFE_NO_PROXY}
+      - http_proxy=${PAYSAFE_PROXY}
+      - https_proxy=${PAYSAFE_PROXY}
+      - no_proxy=${PAYSAFE_NO_PROXY}
+      - RAG_EMBEDDING_BATCH_SIZE=16
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE="searxng"
+      - RAG_WEB_SEARCH_RESULT_COUNT=3
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=10
+      - SEARXNG_BASE_URL="http://searxng:8080"
+      - SEARXNG_MORTY_KEY=${SEARXNG_SECRET}
+      - ENABLE_API_KEYS="true"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+    logging:
+      driver: loki
+      options:
+        loki-url: "http://localhost:3100/loki/api/v1/push"
+
+volumes:
+  ollama: 
+    driver_opts:
+      type: none
+      device: /data/gpuserver1/docker/volumes/open_webui_ollama/_data
+      o: bind
+  open-webui:
+    driver_opts:
+      type: none
+      device: /data/gpuserver1/docker/volumes/open_webui_open-webui/_data
+      o: bind
+
+networks:
+  ollama-network:
+    driver: bridge
+  comfyui_openwebui-bridge:
+    external: true
