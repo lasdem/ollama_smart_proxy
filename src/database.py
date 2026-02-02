@@ -70,8 +70,20 @@ class DatabaseConnection:
     def __init__(self):
         self.engine = None
         self.SessionLocal = None
+        self._simulated_unavailable = False  # For testing
         self._initialize_connection()
         self._ensure_fallback_dir_exists()
+    
+    def set_simulated_unavailable(self, unavailable: bool):
+        """Set simulated unavailability for testing purposes"""
+        self._simulated_unavailable = unavailable
+        logger.info(f"Database simulated unavailability set to: {unavailable}")
+    
+    def is_available(self) -> bool:
+        """Check if database is available (or simulated as unavailable for testing)"""
+        if self._simulated_unavailable:
+            return False
+        return self.engine is not None
     
     def _get_db_config(self):
         """Get current database configuration from environment"""
@@ -87,7 +99,8 @@ class DatabaseConnection:
     
     def _ensure_fallback_dir_exists(self):
         """Ensure fallback log directory exists"""
-        fallback_dir = Path(FALLBACK_LOG_DIR)
+        fallback_log_dir = os.getenv("FALLBACK_LOG_DIR", "./db/fallback_logs")
+        fallback_dir = Path(fallback_log_dir)
         if not fallback_dir.exists():
             fallback_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"Created fallback log directory: {fallback_dir}")
@@ -135,6 +148,8 @@ class DatabaseConnection:
     
     def get_session(self):
         """Get database session"""
+        if self._simulated_unavailable:
+            raise Exception("Database is simulated as unavailable for testing")
         return self.SessionLocal()
     
     def close(self):
@@ -142,6 +157,12 @@ class DatabaseConnection:
         if self.engine:
             self.engine.dispose()
             logger.info("Database connection closed")
+    
+    def _serialize_for_json(self, obj: Any) -> Any:
+        """Convert datetime objects to ISO format strings for JSON serialization"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return obj
     
     def write_to_fallback_file(self, request_data: Dict[str, Any]) -> bool:
         """
@@ -154,14 +175,23 @@ class DatabaseConnection:
             bool: True if write was successful, False otherwise
         """
         try:
+            # Get fallback directory from environment (allows runtime configuration)
+            fallback_log_dir = os.getenv("FALLBACK_LOG_DIR", "./db/fallback_logs")
+            
             # Generate filename based on timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{FALLBACK_LOG_DIR}/fallback_{timestamp}.jsonl"
+            filename = f"{fallback_log_dir}/fallback_{timestamp}.jsonl"
+            
+            # Serialize datetime objects to ISO format strings
+            serialized_data = {
+                key: self._serialize_for_json(value) 
+                for key, value in request_data.items()
+            }
             
             # Write data to file with locking
             with open(filename, 'a') as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                json_line = json.dumps(request_data)
+                json_line = json.dumps(serialized_data)
                 f.write(json_line + '\n')
                 f.flush()
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
@@ -181,7 +211,8 @@ class DatabaseConnection:
             int: Number of records recovered
         """
         recovered_count = 0
-        fallback_dir = Path(FALLBACK_LOG_DIR)
+        fallback_log_dir = os.getenv("FALLBACK_LOG_DIR", "./db/fallback_logs")
+        fallback_dir = Path(fallback_log_dir)
         
         if not fallback_dir.exists():
             logger.info("No fallback directory found, nothing to recover")
@@ -199,7 +230,13 @@ class DatabaseConnection:
         
         logger.info(f"Found {len(fallback_files)} fallback file(s) to recover")
         
+        files_to_delete = []
+        
         for file_path in fallback_files:
+            session = None
+            file_recovered_count = 0
+            file_had_errors = False
+            
             try:
                 with open(file_path, 'r') as f:
                     fcntl.flock(f.fileno(), fcntl.LOCK_SH)
@@ -207,6 +244,8 @@ class DatabaseConnection:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 
                 if not lines:
+                    # Empty file, safe to delete
+                    files_to_delete.append(file_path)
                     continue
                 
                 session = self.get_session()
@@ -244,26 +283,48 @@ class DatabaseConnection:
                         )
                         
                         session.add(request_log)
-                        recovered_count += 1
+                        file_recovered_count += 1
                         
                     except Exception as e:
-                        logger.error(f"Error processing line: {e}")
+                        logger.error(f"Error processing line in {file_path}: {e}")
+                        file_had_errors = True
                         continue
                 
-                session.commit()
+                # Try to commit if we processed at least one record
+                if file_recovered_count > 0:
+                    try:
+                        session.commit()
+                        recovered_count += file_recovered_count
+                        logger.info(f"Recovered {file_recovered_count} records from {file_path.name}")
+                    except Exception as commit_error:
+                        logger.error(f"Error committing records from {file_path.name}: {commit_error}")
+                        session.rollback()
+                        file_had_errors = True
+                        file_recovered_count = 0  # Failed to commit, so nothing was actually recovered
+                
+                # Always delete file after processing to prevent infinite retry loops
+                # Even if all records failed, we've logged the errors and tried our best
+                files_to_delete.append(file_path)
+                
+                if file_had_errors and file_recovered_count == 0:
+                    logger.warning(f"All records in {file_path.name} failed to process, marking for deletion to prevent retry loop")
                 
             except Exception as e:
                 logger.error(f"Error recovering from file {file_path}: {e}")
-                session.rollback()
-                continue
+                if session:
+                    session.rollback()
+                # Mark for deletion even if file read failed - prevents stuck files
+                files_to_delete.append(file_path)
+                logger.warning(f"Marking {file_path.name} for deletion after error to prevent retry loop")
             finally:
-                session.close()
+                if session:
+                    session.close()
         
-        # Remove processed files
-        for file_path in fallback_files:
+        # Remove successfully processed files
+        for file_path in files_to_delete:
             try:
                 file_path.unlink()
-                logger.info(f"Removed processed fallback file: {file_path}")
+                logger.info(f"Removed processed fallback file: {file_path.name}")
             except Exception as e:
                 logger.error(f"Error removing file {file_path}: {e}")
         

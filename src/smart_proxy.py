@@ -63,7 +63,19 @@ PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per queued + recent (combined max 100)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
 
+# --- SECURITY GLOBALS ---
+ADMIN_KEY = os.getenv("PROXY_ADMIN_KEY", None)
+if not ADMIN_KEY:
+    logger.warning("PROXY_ADMIN_KEY is not set! Admin endpoints will be unprotected.")
 
+# Static IPs from Env (Always allowed)
+STATIC_ADMIN_IPS = [ip.strip() for ip in os.getenv("ADMIN_IPS", "127.0.0.1,::1").split(",")]
+
+# Dynamic Auth: { "192.168.1.5": <timestamp_expiry> }
+authorized_ips: Dict[str, float] = {}
+
+# Paths that require protection
+ADMIN_PATHS = ["api/pull", "api/push", "api/create", "api/copy", "api/delete", "api/blobs"]
 
 litellm.drop_params = True
 
@@ -331,6 +343,41 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
             # Return OpenAI standard format directly
             return JSONResponse(content=response.model_dump())
 
+def verify_admin_access(request: Request):
+    """
+    Check if the request is authorized via:
+    1. Static Whitelist (.env)
+    2. Dynamic Auth Session (/proxy/auth)
+    3. X-Admin-Key Header (Scripts/Curl)
+    """
+    client_ip = request.client.host
+    now = time.time()
+    
+    # 1. Check Static IPs (Fastest)
+    if client_ip in STATIC_ADMIN_IPS:
+        return
+
+    # 2. Check Dynamic IPs (Session)
+    if client_ip in authorized_ips:
+        expiry = authorized_ips[client_ip]
+        if now < expiry:
+            return # Valid Session
+        else:
+            # Clean up expired session
+            del authorized_ips[client_ip]
+
+    # 3. Check Direct Header (for scripts/curl without session)
+    auth_header = request.headers.get("X-Admin-Key")
+    if auth_header == ADMIN_KEY:
+        return
+
+    # If all fail
+    logger.warning(f"Unauthorized Admin Attempt: {client_ip} on {request.url.path}")
+    raise HTTPException(
+        status_code=403, 
+        detail="Restricted endpoint. Please authenticate via /proxy/auth or use X-Admin-Key header."
+    )
+
 async def enqueue_request(request: Request, endpoint_type: EndpointType):
     """Shared logic for all endpoints to handle validation, logging, and queuing"""
     try:
@@ -574,11 +621,55 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 del active_requests[request.request_id]
         tracker.remove_request(request.ip, request.model_name)
 
+async def forward_request_to_ollama(request: Request, path: str):
+    base_url = OLLAMA_API_BASE.rstrip("/")
+    # Ensure clean path joining
+    target_url = f"{base_url}/{path.lstrip('/')}"
+    
+    if request.url.query:
+        target_url += f"?{request.url.query}"
+
+    # Filter headers
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    headers.pop("content-length", None)
+
+    client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
+
+    try:
+        req = client.build_request(
+            request.method,
+            target_url,
+            headers=headers,
+            content=request.stream()
+        )
+        r = await client.send(req, stream=True)
+        return StreamingResponse(
+            r.aiter_raw(),
+            status_code=r.status_code,
+            headers=dict(r.headers),
+            background=BackgroundTask(r.aclose)
+        )
+    except Exception as e:
+        await client.aclose()
+        logger.error(f"Upstream error for {path}: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     vram_monitor.start()
     asyncio.create_task(queue_worker())
+    
+    # Recover any pending fallback logs
+    from database import get_db
+    db = get_db()
+    try:
+        recovered_count = db.recover_from_fallback_files()
+        if recovered_count > 0:
+            logger.info(f"Recovered {recovered_count} records from fallback files on startup")
+    except Exception as e:
+        logger.error(f"Error recovering fallback files on startup: {e}")
     
     logger.info(
         f"Smart Proxy started on {PROXY_HOST}:{PROXY_PORT}",
@@ -623,23 +714,70 @@ async def handle_openai_legacy(request: Request):
     return format_output(response, stream, EndpointType.OPENAI_LEGACY)
 
 
+# Smart Proxy Specific Endpoints
+@app.get("/proxy/")
+async def root():
+    return {
+        "service": "Ollama Smart Proxy",
+        "version": "3.5",
+        "features": [
+            "VRAM-aware priority queue",
+            "Model affinity scheduling",
+            "IP-based fairness",
+            "Wait time starvation prevention",
+            "Request ID tracking"
+        ]
+    }
 
-# --- TESTING ENDPOINT: PAUSE/RESUME QUEUE PROCESSING ---
-class PauseRequest(BaseModel):
-    pause: bool
+# --- TESTING ENDPOINT: CONTROL QUEUE AND DB SIMULATION ---
+class TestingControlRequest(BaseModel):
+    pause: Optional[bool] = None
+    db_available: Optional[bool] = None
 
 @app.post("/proxy/testing")
-async def proxy_testing_control(req: PauseRequest):
+async def proxy_testing_control(req: TestingControlRequest):
     """
     POST /proxy/testing
-    {"pause": true}  -> Pauses queue processing
-    {"pause": false} -> Resumes queue processing
-    Returns current state.
+    Control testing parameters for queue processing and database simulation.
+    
+    Examples:
+    {"pause": true}         -> Pauses queue processing
+    {"pause": false}        -> Resumes queue processing
+    {"db_available": false} -> Simulates DB unavailability (uses fallback)
+    {"db_available": true}  -> Restores DB availability (triggers recovery)
+    {"pause": true, "db_available": false} -> Both operations
+    
+    Returns current state of both systems.
     """
-    set_queue_processing_paused(req.pause)
-    return {
-        "paused": is_queue_processing_paused()
-    }
+    result = {}
+    
+    # Handle queue pause/resume
+    if req.pause is not None:
+        set_queue_processing_paused(req.pause)
+    result["paused"] = is_queue_processing_paused()
+    
+    # Handle DB availability simulation
+    if req.db_available is not None:
+        from database import get_db
+        db = get_db()
+        
+        if req.db_available:
+            # Restore DB and trigger recovery
+            db.set_simulated_unavailable(False)
+            recovered = db.recover_from_fallback_files()
+            result["db_available"] = True
+            result["recovered_records"] = recovered
+        else:
+            # Simulate DB unavailability
+            db.set_simulated_unavailable(True)
+            result["db_available"] = False
+    else:
+        # If not specified, just return current state (always available in production)
+        from database import get_db
+        db = get_db()
+        result["db_available"] = not db._simulated_unavailable
+    
+    return result
 
 
 @app.get("/proxy/health")
@@ -700,77 +838,63 @@ async def queue_status():
 async def vram_status():
     return vram_monitor.get_stats()
 
+class AuthPayload(BaseModel):
+    key: str
 
-@app.get("/proxy/")
-async def root():
+@app.post("/proxy/auth")
+async def proxy_login(payload: AuthPayload, request: Request):
+    """
+    Authenticate an IP address for 24 hours using the Admin Key.
+    """
+    if payload.key != ADMIN_KEY:
+        # Rate limiting logic could go here to prevent brute force
+        logger.warning(f"Invalid Admin Key Attempt from {request.client.host}")
+        raise HTTPException(status_code=403, detail="Invalid Admin Key")
+
+    client_ip = request.client.host
+    expiration = time.time() + (24 * 60 * 60) # 24 Hours from now
+    
+    # Add/Update the IP in the allowed list
+    authorized_ips[client_ip] = expiration
+    
+    logger.info(f"Admin Access Granted: {client_ip} until {datetime.fromtimestamp(expiration)}")
+    
     return {
-        "service": "Ollama Smart Proxy",
-        "version": "3.2",
-        "features": [
-            "VRAM-aware priority queue",
-            "Model affinity scheduling",
-            "IP-based fairness",
-            "Wait time starvation prevention",
-            "Request ID tracking"
-        ]
+        "status": "authenticated",
+        "ip": client_ip,
+        "expires_at": datetime.fromtimestamp(expiration).isoformat()
     }
 
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"])
+
+# --- 1. Explicit Protected Admin Routes ---
+@app.api_route("/api/pull", methods=["POST"])
+@app.api_route("/api/push", methods=["POST"])
+@app.api_route("/api/create", methods=["POST"])
+@app.api_route("/api/copy", methods=["POST"])
+@app.api_route("/api/delete", methods=["DELETE"])
+@app.api_route("/api/blobs/{digest}", methods=["POST", "HEAD"]) 
+async def protected_admin_routes(request: Request):
+    # This will raise 403 if not authorized
+    verify_admin_access(request)
+
+    # Log access
+    logger.info(
+        f"Admin Access: {request.client.host} to {request.url.path}",
+        extra={"event": "admin_access", "ip": request.client.host, "path": request.url.path}
+    )
+
+    # Forward if valid
+    return await forward_request_to_ollama(request, request.url.path)
+
+# --- 2. Catch-All for Read-Only (Safe) Routes ---
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"])
 async def proxy_catch_all(request: Request, path: str):
-    """
-    Catch-all proxy: Forwards all other requests (tags, pull, generic generate, etc.)
-    directly to the backend Ollama instance transparently.
-    """
-    
-    # 1. Construct the target URL
-    # We strip trailing slashes from base to avoid double slashes
-    base_url = OLLAMA_API_BASE.rstrip("/")
-    target_url = f"{base_url}/{path}"
-    
-    # Append query parameters if they exist (e.g. ?limit=10)
-    if request.url.query:
-        target_url += f"?{request.url.query}"
+    # Double check no admin paths slipped into the wildcard
+    # (Optional safety net)
+    if any(path.startswith(p) for p in ADMIN_PATHS):
+        verify_admin_access(request)
 
-    logger.debug(f"Proxying generic request: {request.method} {path} -> {target_url}")
-
-    # 2. Filter headers
-    # We generally want to forward headers, but 'host' should be strictly
-    # managed by the HTTP client to avoid confusing the backend.
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None) # Let httpx recalculate this based on the stream
-
-    # 3. Create a client and send the request
-    # We use a context manager inside the handler. For high-load production, 
-    # you might want to create a global httpx.AsyncClient in lifespan.
-    client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
-
-    try:
-        # Build the request, streaming the body from the incoming client request
-        req = client.build_request(
-            request.method,
-            target_url,
-            headers=headers,
-            content=request.stream()  # Stream request body to backend
-        )
-        
-        # Send the request and get a streaming response
-        r = await client.send(req, stream=True)
-        
-        # 4. Stream the response back to the client
-        return StreamingResponse(
-            r.aiter_raw(),
-            status_code=r.status_code,
-            headers=dict(r.headers),
-            # BackgroundTask ensures the client is closed after the response finishes
-            background=BackgroundTask(r.aclose)
-        )
-        
-    except Exception as e:
-        # Ensure client is closed if we crash before returning the response
-        await client.aclose()
-        logger.error(f"Proxy error for {path}: {str(e)}")
-        raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
+    return await forward_request_to_ollama(request, path)
 
 if __name__ == "__main__":
     import uvicorn
