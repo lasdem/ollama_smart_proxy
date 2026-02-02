@@ -15,6 +15,7 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Body
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 import litellm
 from litellm import acompletion
@@ -524,8 +525,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
         # 4. Set Result
         request.future.set_result(response)
         stats["completed_requests"] += 1
-        duration = time.time() - start_time
-        processing_time = duration - queue_wait
+        processing_time = time.time() - start_time
+        total_duration = time.time() - request.timestamp
         
         # Log completion
         await asyncio.to_thread(
@@ -534,7 +535,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
             request.ip,
             request.model_name,
             "completed",
-            duration,
+            total_duration,
             priority_score,
             response_text=response_text, 
             processing_time_seconds=processing_time
@@ -545,14 +546,13 @@ async def process_request(request: QueuedRequest, priority_score: int):
             extra={
                 "event": "request_completed",
                 "request_id": request.request_id,
-                "duration_seconds": round(duration, 2)
+                "duration_seconds": round(total_duration, 2)
             }
         )
         
     except Exception as e:
-        duration = time.time() - start_time
-        queue_wait = start_time - request.timestamp
-        processing_time = duration - queue_wait
+        processing_time = time.time() - start_time
+        total_duration = time.time() - request.timestamp
         
         await asyncio.to_thread(
             request_repo.log_request,
@@ -560,7 +560,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
             request.ip,
             request.model_name,
             "error",
-            duration,
+            total_duration,
             priority_score,
             processing_time_seconds=processing_time
         )
@@ -623,15 +623,33 @@ async def handle_openai_legacy(request: Request):
     return format_output(response, stream, EndpointType.OPENAI_LEGACY)
 
 
+
+# --- TESTING ENDPOINT: PAUSE/RESUME QUEUE PROCESSING ---
+class PauseRequest(BaseModel):
+    pause: bool
+
+@app.post("/proxy/testing")
+async def proxy_testing_control(req: PauseRequest):
+    """
+    POST /proxy/testing
+    {"pause": true}  -> Pauses queue processing
+    {"pause": false} -> Resumes queue processing
+    Returns current state.
+    """
+    set_queue_processing_paused(req.pause)
+    return {
+        "paused": is_queue_processing_paused()
+    }
+
+
 @app.get("/proxy/health")
 async def health_check():
     async with queue_lock:
         queue_depth = len(request_queue)
-    
     vram_stats = vram_monitor.get_stats()
-    
     return {
         "status": "healthy",
+        "paused": is_queue_processing_paused(),
         "timestamp": datetime.utcnow().isoformat(),
         "queue_depth": queue_depth,
         "active_requests": tracker.active_request_count,
@@ -669,12 +687,12 @@ async def queue_status():
             }
             for req in request_queue
         ]
-    
     return {
+        "paused": is_queue_processing_paused(),
         "total_depth": len(processing_items) + len(queued_items),
         "processing_count": len(processing_items),
         "queued_count": len(queued_items),
-        "requests": processing_items + queued_items # Processing first, then queued
+        "requests": processing_items + queued_items 
     }
 
 
@@ -753,24 +771,6 @@ async def proxy_catch_all(request: Request, path: str):
         await client.aclose()
         logger.error(f"Proxy error for {path}: {str(e)}")
         raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
-
-
-# --- TESTING ENDPOINT: PAUSE/RESUME QUEUE PROCESSING ---
-@app.post("/proxy/testing")
-async def proxy_testing_control(
-    pause: Optional[bool] = Body(...)
-):
-    """
-    POST /proxy/testing
-    {"pause": true}  -> Pauses queue processing
-    {"pause": false} -> Resumes queue processing
-    Returns current state.
-    """
-    set_queue_processing_paused(bool(pause))
-    return {
-        "paused": is_queue_processing_paused()
-    }
-
 
 if __name__ == "__main__":
     import uvicorn

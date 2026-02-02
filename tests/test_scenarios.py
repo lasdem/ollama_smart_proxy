@@ -125,8 +125,6 @@ async def test_scenario_same_model_bunching():
     errors = []
 
     async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_DEFAULT) as client:
-        # Pause queue processing
-        await client.post("/proxy/testing", json={"pause": True})
         # Health Check
         try:
             health = await client.get("/proxy/health")
@@ -147,20 +145,29 @@ async def test_scenario_same_model_bunching():
             except Exception as e:
                 errors.append(str(e))
 
+        # Pause queue processing
+        await client.post("/proxy/testing", json={"pause": True})
+        
         # Create interleaved tasks
         tasks = []
+        print(f"   ⏳ Sending {n_pairs*2} interleaved requests...")
         for i in range(n_pairs):
             tasks.append(asyncio.create_task(fetch(model_a, i)))
             tasks.append(asyncio.create_task(fetch(model_b, i)))
-        print(f"   ⏳ Sending {n_pairs*2} interleaved requests...")
-        await asyncio.gather(*tasks)
 
-        # Optionally inspect queue here if needed
+        print("   ⏳ Waiting...")
+        await asyncio.sleep(1.0)
+        
+        # Inspect queue priorities
+        queue_resp = await client.get("/proxy/queue")
+        queue_data = queue_resp.json()
+        print(f"   🧐 Queue state before processing: {queue_data}")
+        
         # Resume processing
         await client.post("/proxy/testing", json={"pause": False})
 
         # Wait for completions
-        await asyncio.sleep(0.1 * n_pairs)  # Small wait for processing
+        await asyncio.gather(*tasks)
 
         # Analysis
         if errors:
@@ -205,16 +212,29 @@ async def test_scenario_large_model_deferral():
 
         tasks = []
 
-        # 1. Explicitly load both models
-        print(f"   1️⃣  Preloading {TestConfig.MODEL_LARGE} and {TestConfig.MODEL_SMALL}...")
+        # 1. Explicitly load both models to lets the proxy see VRAM usage
+        print(f"   1️⃣  Preloading Models")
         await client.post("/v1/chat/completions", json={"model": TestConfig.MODEL_LARGE, "messages": [{"role": "user", "content": "init"}]})
+        await client.post("/v1/chat/completions", json={"model": TestConfig.MODEL_MEDIUM, "messages": [{"role": "user", "content": "init"}]})
         await client.post("/v1/chat/completions", json={"model": TestConfig.MODEL_SMALL, "messages": [{"role": "user", "content": "init"}]})
         
         # 2. Explicitly unload both models
-        print(f"   2️⃣  Unloading {TestConfig.MODEL_LARGE} and {TestConfig.MODEL_SMALL}...")
+        print(f"   2️⃣  Unloading Models")
         await ollama_client.post("/api/chat", json={"model": TestConfig.MODEL_LARGE, "keep_alive": 0})
+        await ollama_client.post("/api/chat", json={"model": TestConfig.MODEL_MEDIUM, "keep_alive": 0})
         await ollama_client.post("/api/chat", json={"model": TestConfig.MODEL_SMALL, "keep_alive": 0})
         
+        # Wait for VRAM monitor to reflect no models loaded
+        print("   ⏳ Waiting for VRAM to be clear...")
+        for _ in range(30):
+            ps = await ollama_client.get("/api/ps")
+            models = ps.json().get('models', [])
+            if not models:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            pytest.fail("VRAM not cleared before test.")
+
         # Pause queue processing
         await client.post("/proxy/testing", json={"pause": True})
 
@@ -222,19 +242,26 @@ async def test_scenario_large_model_deferral():
         print(f"   3️⃣  Queuing LARGE ({TestConfig.MODEL_LARGE})...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_LARGE, "Large")))
-        print(f"   4️⃣  Queuing SMALL ({TestConfig.MODEL_SMALL})...")
+        print(f"   4️⃣  Queuing MEDIUM ({TestConfig.MODEL_MEDIUM})...")
+        for i in range(requests_per_model):
+            tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_MEDIUM, "Medium")))
+        print(f"   5️⃣  Queuing SMALL ({TestConfig.MODEL_SMALL})...")
         for i in range(requests_per_model):
             tasks.append(asyncio.create_task(fetch(TestConfig.MODEL_SMALL, "Small")))
         print("   ⏳ Waiting...")
-        await asyncio.gather(*tasks)
+        await asyncio.sleep(1.0)
+        
         # Inspect queue priorities
         queue_resp = await client.get("/proxy/queue")
         queue_data = queue_resp.json()
         print(f"   🧐 Queue state before processing: {queue_data}")
+        
         # Resume processing
         await client.post("/proxy/testing", json={"pause": False})
-        # Wait for completions
-        await asyncio.sleep(1.0)
+
+        # Wait for all tasks to complete
+        await asyncio.gather(*tasks)
+        
         if errors:
             pytest.fail(f"Requests failed: {errors}")
         try:
@@ -242,7 +269,7 @@ async def test_scenario_large_model_deferral():
             last_small_idx = len(completion_order) - 1 - completion_order[::-1].index(TestConfig.MODEL_SMALL)
         except ValueError:
             pytest.fail("Missing models in response.")
-        visual_map = ["LG" if m == TestConfig.MODEL_LARGE else "SM" for m in completion_order]
+        visual_map = ["LG" if m == TestConfig.MODEL_LARGE else "MD" if m == TestConfig.MODEL_MEDIUM else "SM" for m in completion_order]
         print(f"   📊 Stream: {visual_map}")
         assert last_small_idx < first_large_idx, "❌ Priority Failed: Large model finished before last Small model."
         print("   ✅ SUCCESS: Small models prioritized.")
@@ -354,14 +381,21 @@ async def test_scenario_priority_reordering():
         tasks.append(asyncio.create_task(fetch(unloaded_model, "Unloaded")))
         print(f"   Queuing Loaded ({loaded_model})...")
         tasks.append(asyncio.create_task(fetch(loaded_model, "Loaded")))
-        await asyncio.gather(*tasks)
+
+        await asyncio.sleep(0.1)
+
         # Inspect queue
         queue_resp = await client.get("/proxy/queue")
         queue_data = queue_resp.json()
         print(f"   🧐 Queue state before processing: {queue_data}")
+        
         # Resume processing
         await client.post("/proxy/testing", json={"pause": False})
-        await asyncio.sleep(1.0)
+        
+        # Wait for completions of all tasks
+        await asyncio.gather(*tasks)
+        
+        # --- ANALYSIS ---
         # Check order: Loaded should finish BEFORE Unloaded
         try:
             unloaded_idx = completion_order.index("Unloaded")
@@ -391,7 +425,6 @@ async def test_scenario_ip_fairness():
     completion_order = []
     
     async with httpx.AsyncClient(base_url=TestConfig.PROXY_URL, timeout=TestConfig.TIMEOUT_HEAVY) as client:
-        
         async def fetch(ip, label):
             try:
                 # Use a tiny prompt so execution is fast once picked up
@@ -411,61 +444,48 @@ async def test_scenario_ip_fairness():
 
         tasks = []
 
-        # 1. Block the Active Slots (IP1)
-        # Assuming max_parallel=3, these fill the GPU.
-        print("   1️⃣  Blocking slots with IP1...")
-        for i in range(3):
-            tasks.append(asyncio.create_task(fetch("10.0.0.1", "IP1")))
-        
-        await asyncio.sleep(0.5) # Wait for them to start processing
+        # Pause queue processing for deterministic queue state
+        await client.post("/proxy/testing", json={"pause": True})
 
-        # 2. Build the Queue (IP1 - High Penalty)
+        # Build the Queue (IP1 - High Penalty)
         print(f"   2️⃣  Queuing {ip1_count} backlog requests from IP1...")
         for i in range(ip1_count):
             tasks.append(asyncio.create_task(fetch("10.0.0.1", "IP1")))
-            
-        await asyncio.sleep(0.5) # Ensure these are firmly registered in queue with high penalty
 
-        # 3. The New User (IP2 - Zero Penalty)
+        # The New User (IP2 - Zero Penalty)
         print("   3️⃣  Queuing 1 request from IP2...")
         tasks.append(asyncio.create_task(fetch("10.0.0.2", "IP2")))
 
-        print("   ⏳ Waiting for execution...")
+        print("   ⏳ Waiting...")
+        await asyncio.sleep(0.1)
+
+        # Inspect queue state before processing
+        queue_resp = await client.get("/proxy/queue")
+        queue_data = queue_resp.json()
+        print(f"   🧐 Queue state before processing: {queue_data}")
+
+        # Resume processing
+        await client.post("/proxy/testing", json={"pause": False})
+
+        # Wait for all tasks to be completed
         await asyncio.gather(*tasks)
 
         # --- ANALYSIS ---
-        
-        # We assume the first 3 (Active) IP1 requests finish first naturally.
-        # The fairness check applies to the QUEUE.
-        # IP2 should appear before the END of the list.
-        
         print(f"   📊 Completion Order: {completion_order}")
-        
         try:
             ip2_position = completion_order.index("IP2")
             total_requests = len(completion_order)
-            
             # Assertion 1: It finished
             assert ip2_position != -1, "IP2 request failed or didn't finish"
-            
             # Assertion 2: Fairness
-            # If IP2 was treated fairly, it should have jumped the queue.
-            # It shouldn't be the absolute last request (waiting for all 10 IP1s to finish).
-            # Note: We relax the check slightly to allow for race conditions, 
-            # but generally IP2 should be in the first half of the queued items.
-            
             requests_processed_after_ip2 = total_requests - 1 - ip2_position
             print(f"   📍 IP2 finished at index {ip2_position}/{total_requests-1}")
             print(f"   🚀 IP2 jumped ahead of {requests_processed_after_ip2} IP1 requests.")
-            
             assert requests_processed_after_ip2 > 0, \
                 "❌ IP Fairness Failed: IP2 was stuck at the very end of the queue behind all IP1 requests."
-            
             # Stronger assertion: It should beat at least HALF the backlog
             assert requests_processed_after_ip2 >= (ip1_count / 2), \
                 "⚠️ Weak Fairness: IP2 finished, but didn't jump enough of the queue."
-
         except ValueError:
             pytest.fail("IP2 request did not complete successfully.")
-
         print("   ✅ SUCCESS: IP2 was prioritized over the IP1 backlog.")

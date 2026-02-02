@@ -15,7 +15,6 @@
 - Overhaul test_scenario_priority_reordering: Review and redesign logic to robustly test loaded vs unloaded model queue priority
 - Ensure IP fairness: Requests from new IPs must not be starved by large backlogs from other IPs (see test_scenario_ip_fairness)
 - Review and improve queue penalty/priority logic for both model and IP fairness
-- Improve test coverage
 
 ### Phase 3: Deployment
 - Finish Analytics
@@ -51,6 +50,14 @@
 #### v3.4.4 Migration Scripts
 - [ ] Schema migration tool
 - [ ] Backfill historical data
+
+#### v3.4.5 Bug Fixes ✅
+- [x] Fixed timing calculation bug causing negative processing times
+  - Issue: `processing_time = duration - queue_wait` was incorrect
+  - Fix: `processing_time = time.time() - start_time`
+  - Fix: `total_duration = time.time() - request.timestamp`
+  - Invariant: `total_duration = queue_wait + processing_time`
+  - See: docs/changelog/v3.4.5_TIMING_FIX.md
 
 ---
 
