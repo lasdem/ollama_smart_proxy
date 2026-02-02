@@ -582,6 +582,67 @@ class AnalyticsQueryBuilder:
         finally:
             session.close()
 
+    def get_model_bunching_detection(self, start_time: datetime, end_time: datetime, time_window_seconds: int = 60) -> List[Dict[str, Any]]:
+        """
+        Detect model bunching - when multiple requests for the same model arrive close together
+        
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            time_window_seconds: Time window in seconds to detect bunching (default: 60s)
+            
+        Returns:
+            List[Dict]: Model bunching statistics
+        """
+        try:
+            session = self.db.get_session()
+            
+            # Query to detect bunching: count requests per model in time windows
+            # We'll group by model and time buckets to find bunching patterns
+            result = session.execute(text("""
+                WITH time_buckets AS (
+                    SELECT 
+                        model_name,
+                        datetime((strftime('%s', timestamp_received) / :window_seconds) * :window_seconds, 'unixepoch') as time_bucket,
+                        COUNT(*) as requests_in_bucket
+                    FROM request_logs
+                    WHERE timestamp_received BETWEEN :start_time AND :end_time
+                    GROUP BY model_name, time_bucket
+                )
+                SELECT 
+                    model_name,
+                    COUNT(*) as total_time_buckets,
+                    AVG(requests_in_bucket) as avg_requests_per_bucket,
+                    MAX(requests_in_bucket) as max_requests_in_bucket,
+                    SUM(CASE WHEN requests_in_bucket > 1 THEN 1 ELSE 0 END) as bunched_buckets,
+                    ROUND(100.0 * SUM(CASE WHEN requests_in_bucket > 1 THEN 1 ELSE 0 END) / COUNT(*), 2) as bunching_rate_percent
+                FROM time_buckets
+                GROUP BY model_name
+                HAVING bunched_buckets > 0
+                ORDER BY bunching_rate_percent DESC, max_requests_in_bucket DESC
+            """), {
+                "start_time": start_time,
+                "end_time": end_time,
+                "window_seconds": time_window_seconds
+            }).fetchall()
+            
+            return [
+                {
+                    "model_name": row[0],
+                    "total_time_buckets": row[1],
+                    "avg_requests_per_bucket": round(row[2], 2),
+                    "max_requests_in_bucket": row[3],
+                    "bunched_buckets": row[4],
+                    "bunching_rate_percent": row[5]
+                }
+                for row in result
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get model bunching detection: {e}")
+            raise
+        finally:
+            session.close()
+
 
 # Global database instance
 db_connection = None

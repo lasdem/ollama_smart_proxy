@@ -398,6 +398,20 @@ class AnalyticsRepository:
         """
         return self.analytics.get_priority_score_distribution(start_time, end_time, group_by)
 
+    def get_model_bunching_detection(self, start_time: datetime, end_time: datetime, time_window_seconds: int = 60) -> List[Dict[str, Any]]:
+        """
+        Detect model bunching - when multiple requests for the same model arrive close together
+        
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            time_window_seconds: Time window in seconds to detect bunching (default: 60s)
+            
+        Returns:
+            List[Dict]: Model bunching statistics
+        """
+        return self.analytics.get_model_bunching_detection(start_time, end_time, time_window_seconds)
+
 
 # Global repository instances
 request_log_repository = None
