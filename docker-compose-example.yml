@@ -35,13 +35,13 @@ services:
       options:
         loki-url: "http://localhost:3100/loki/api/v1/push"
 
-  ollama-proxy:
+  ollama-smart-proxy:
     image: ollama-smart-proxy:local    # Matches your manual build tag
-    container_name: ollama-proxy
+    container_name: ollama-smart-proxy
     pull_policy: never           # CRITICAL: Do not try to pull from DockerHub
     volumes:
       # Persist database and logs
-      - ./db:/app/db
+      - '/data/gpuserver1/docker/mounts/open_webui/ollama-smart-proxy/db/:/app/db/'
     restart: unless-stopped
     ports:
       # The proxy takes over the public port (Host:11434 -> Proxy:8080)
@@ -56,12 +56,6 @@ services:
       - LOG_FORMAT=json # Options: json, human
       - LOG_LEVEL=INFO
       - ACCESS_LOG_LEVEL=WARNING
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/proxy/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     logging:
       driver: loki
       options:
@@ -148,7 +142,7 @@ services:
       - comfyui_openwebui-bridge
     environment:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
-      - OLLAMA_BASE_URL=http://ollama-proxy:8080
+      - OLLAMA_BASE_URL=http://ollama-smart-proxy:8080
       - HTTP_PROXY=${PAYSAFE_PROXY}
       - HTTPS_PROXY=${PAYSAFE_PROXY}
       - NO_PROXY=${PAYSAFE_NO_PROXY}

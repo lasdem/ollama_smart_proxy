@@ -26,6 +26,10 @@ WORKDIR /app
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 
+# Install sqlite3
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends sqlite3
+
 # Copy application code
 COPY src/ ./src/
 COPY run_proxy.sh ./
