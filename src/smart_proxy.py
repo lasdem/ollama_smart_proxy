@@ -431,6 +431,10 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
     async with queue_lock:
         request_queue.append(queued_req)
         stats["total_requests"] += 1
+        # Update max queue depth if current depth exceeds the recorded max
+        current_depth = len(request_queue)
+        if current_depth > stats["queue_depth_max"]:
+            stats["queue_depth_max"] = current_depth
     
     logger.info(f"[{req_id}] Queued via {endpoint_type.value}", extra={"event": "queued"})
     
