@@ -1,0 +1,4 @@
+# Requirements for admin_dashboard.py client script
+requests>=2.31.0
+rich>=13.7.0  # For beautiful terminal formatting
+python-dotenv>=1.0.0  # For loading .env configuration

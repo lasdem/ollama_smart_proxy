@@ -97,6 +97,29 @@ class DatabaseConnection:
             'SQLITE_DB_PATH': os.getenv("SQLITE_DB_PATH", "/db/smart_proxy.db")
         }
     
+    def _get_date_trunc_expr(self, interval: str, column: str = 'timestamp_received') -> str:
+        """
+        Get database-specific date truncation expression
+        Args:
+            interval: 'hour', 'day', or 'week'
+            column: Column name to truncate
+        Returns:
+            SQL expression for date truncation
+        """
+        config = self._get_db_config()
+        if config['DB_TYPE'] == "postgres":
+            return f"DATE_TRUNC('{interval}', {column})"
+        else:  # SQLite
+            if interval == 'hour':
+                return f"strftime('%Y-%m-%d %H:00:00', {column})"
+            elif interval == 'day':
+                return f"strftime('%Y-%m-%d 00:00:00', {column})"
+            elif interval == 'week':
+                # SQLite: week starts on Monday
+                return f"date({column}, 'weekday 0', '-6 days')"
+            else:
+                return f"strftime('%Y-%m-%d %H:00:00', {column})"
+    
     def _ensure_fallback_dir_exists(self):
         """Ensure fallback log directory exists"""
         fallback_log_dir = os.getenv("FALLBACK_LOG_DIR", "./db/fallback_logs")
@@ -353,7 +376,7 @@ class AnalyticsQueryBuilder:
             if group_by == 'model_name':
                 group_col = 'model_name'
             elif group_by == 'hour':
-                group_col = "DATE_TRUNC('hour', timestamp_received)"
+                group_col = self.db._get_date_trunc_expr('hour')
             else:
                 group_col = 'model_name'
 
@@ -447,7 +470,7 @@ class AnalyticsQueryBuilder:
             if group_by == 'model_name':
                 group_col = 'model_name'
             elif group_by == 'hour':
-                group_col = "DATE_TRUNC('hour', timestamp_received)"
+                group_col = self.db._get_date_trunc_expr('hour')
             else:
                 group_col = 'model_name'
 
@@ -607,15 +630,8 @@ class AnalyticsQueryBuilder:
         try:
             session = self.db.get_session()
             
-            # Build time grouping based on interval
-            if interval == 'hour':
-                time_column = "DATE_TRUNC('hour', timestamp_received)"
-            elif interval == 'day':
-                time_column = "DATE_TRUNC('day', timestamp_received)"
-            elif interval == 'week':
-                time_column = "DATE_TRUNC('week', timestamp_received)"
-            else:
-                time_column = "DATE_TRUNC('hour', timestamp_received)"
+            # Build time grouping based on interval using database-specific function
+            time_column = self.db._get_date_trunc_expr(interval)
             
             result = session.execute(text(f"""
                 SELECT 

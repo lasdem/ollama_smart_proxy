@@ -30,12 +30,32 @@ All planned features have been implemented and tested successfully:
 - ✅ Database migration scripts ready
 - ✅ Fallback logging mechanism tested and working
 - ✅ Testing endpoints consolidated
+- ✅ Analytics API endpoint with admin authentication
+- ✅ Admin dashboard client for monitoring
 
 See `docs/changelog/v3.5_ANALYTICS_DEPLOYMENT.md` for details.
 
 ---
 
 ## 🚀 Completed Implementation
+
+### v3.6 - Admin Dashboard & Analytics API ✅
+
+#### v3.6.1 Analytics API Endpoint
+- [x] `/proxy/analytics` endpoint with admin authentication
+- [x] Exposes all AnalyticsRepository queries
+- [x] Configurable time window and grouping
+- [x] Comprehensive analytics data (model stats, IP stats, errors, priorities, bunching)
+
+#### v3.6.2 Admin Dashboard Client
+- [x] Interactive terminal dashboard (`scripts/admin_dashboard.py`)
+- [x] Live updating display with rich formatting
+- [x] Health, VRAM, and Queue status panels
+- [x] Historical analytics tables
+- [x] Snapshot mode for one-time checks
+- [x] Admin key authentication support
+- [x] Optimized for 1080p fullscreen terminal
+- [x] Comprehensive documentation
 
 ### v3.5 - Analytics & Deployment ✅
 

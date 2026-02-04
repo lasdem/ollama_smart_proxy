@@ -739,7 +739,7 @@ class TestingControlRequest(BaseModel):
     db_available: Optional[bool] = None
 
 @app.post("/proxy/testing")
-async def proxy_testing_control(req: TestingControlRequest):
+async def proxy_testing_control(req: TestingControlRequest, request: Request):
     """
     POST /proxy/testing
     Control testing parameters for queue processing and database simulation.
@@ -753,6 +753,8 @@ async def proxy_testing_control(req: TestingControlRequest):
     
     Returns current state of both systems.
     """
+    verify_admin_access(request)
+    
     result = {}
     
     # Handle queue pause/resume
@@ -841,6 +843,62 @@ async def queue_status():
 @app.get("/proxy/vram")
 async def vram_status():
     return vram_monitor.get_stats()
+
+@app.get("/proxy/analytics")
+async def proxy_analytics(
+    request: Request,
+    hours: int = 24,
+    group_by: str = "model_name",
+    limit: int = 10
+):
+    """
+    GET /proxy/analytics
+    Get analytics data for the specified time period.
+    Requires admin authentication.
+    
+    Query Parameters:
+    - hours: Number of hours to look back (default: 24)
+    - group_by: Grouping method for distributions ('model_name' or 'hour', default: 'model_name')
+    - limit: Limit for top IP results (default: 10)
+    
+    Returns comprehensive analytics including:
+    - Request counts by model and IP
+    - Average duration by model
+    - Priority score distribution
+    - Error rate analysis
+    - Model bunching detection
+    - Requests over time
+    """
+    verify_admin_access(request)
+    
+    from data_access import get_analytics_repo
+    from datetime import timedelta
+    
+    analytics_repo = get_analytics_repo()
+    
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(hours=hours)
+    
+    try:
+        analytics_data = {
+            "time_range": {
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+                "hours": hours
+            },
+            "request_count_by_model": analytics_repo.get_request_count_by_model(start_time, end_time),
+            "request_count_by_ip": analytics_repo.get_request_count_by_ip(start_time, end_time, limit),
+            "average_duration_by_model": analytics_repo.get_average_duration_by_model(start_time, end_time),
+            "priority_score_distribution": analytics_repo.get_priority_score_distribution(start_time, end_time, group_by),
+            "error_rate_analysis": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by),
+            "model_bunching_detection": analytics_repo.get_model_bunching_detection(start_time, end_time, time_window_seconds=60),
+            "requests_over_time": analytics_repo.get_requests_over_time(interval='hour')
+        }
+        
+        return analytics_data
+    except Exception as e:
+        logger.error(f"Failed to retrieve analytics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
 
 class AuthPayload(BaseModel):
     key: str
