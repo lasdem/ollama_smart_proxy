@@ -385,9 +385,9 @@ class AnalyticsQueryBuilder:
                 SELECT 
                     {group_col} as group_key,
                     COUNT(*) as total,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as error_count,
-                    ROUND(100.0 * SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) / COUNT(*), 2) as error_rate_percent,
-                    GROUP_CONCAT(CASE WHEN status = 'failed' THEN error_message END, '|') as error_messages
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
+                    ROUND(100.0 * SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) / COUNT(*), 2) as error_rate_percent,
+                    GROUP_CONCAT(CASE WHEN status = 'error' THEN error_message END, '|') as error_messages
                 FROM request_logs
                 WHERE timestamp_received BETWEEN :start_time AND :end_time
                 GROUP BY group_key
