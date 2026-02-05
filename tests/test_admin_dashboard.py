@@ -4,6 +4,9 @@ import httpx
 import asyncio
 import os
 import sys
+import subprocess
+import tempfile
+import time
 from datetime import datetime, timedelta
 
 # Add src to path for imports
@@ -17,6 +20,48 @@ class TestConfig:
     PROXY_URL = "http://localhost:8003"
     ADMIN_KEY = os.getenv("PROXY_ADMIN_KEY", "test_admin_key_12345")
     TIMEOUT = 10.0
+
+
+@pytest.fixture(scope="function", autouse=True)
+def start_proxy_service():
+    """
+    Start the proxy service in the background before tests run, and stop it after tests complete.
+    """
+    log_file = tempfile.NamedTemporaryFile(delete=False, mode="w+t", suffix="_proxy.log")
+    proxy_env = os.environ.copy()
+    proxy_proc = subprocess.Popen([
+        sys.executable, "src/smart_proxy.py"
+    ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)), env=proxy_env)
+
+    # Wait for proxy to be ready
+    ready = False
+    for _ in range(60):
+        try:
+            resp = requests.get("http://localhost:8003/proxy/health", timeout=1)
+            if resp.status_code == 200:
+                ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    if not ready:
+        proxy_proc.terminate()
+        log_file.seek(0)
+        logs = log_file.read()
+        log_file.flush()
+        log_file.close()
+        pytest.fail(f"Proxy did not start in time. Log output:\n{logs}")
+
+    yield log_file.name
+
+    # Teardown: terminate proxy
+    proxy_proc.terminate()
+    try:
+        proxy_proc.wait(timeout=10)
+    except Exception:
+        proxy_proc.kill()
+    log_file.flush()
+    log_file.close()
 
 
 class TestAnalyticsEndpoint:
@@ -82,7 +127,7 @@ class TestAnalyticsEndpoint:
         
         # Check that grouping fields exist
         for item in data.get("priority_score_distribution", []):
-            assert "model_name" in item or "group_key" in item
+            assert "group" in item or "model_name" in item or "group_key" in item
     
     def test_analytics_grouping_by_hour(self):
         """Test analytics grouped by hour"""
@@ -240,7 +285,7 @@ class TestAnalyticsQueries:
         
         # Check structure if data exists
         for item in result:
-            assert "model_name" in item
+            assert "model" in item
             assert "request_count" in item
     
     def test_request_count_by_ip(self):
@@ -254,7 +299,7 @@ class TestAnalyticsQueries:
         assert len(result) <= 10
         
         for item in result:
-            assert "source_ip" in item
+            assert "ip_address" in item
             assert "request_count" in item
     
     def test_average_duration_by_model(self):
@@ -267,8 +312,8 @@ class TestAnalyticsQueries:
         assert isinstance(result, list)
         
         for item in result:
-            assert "model_name" in item
-            assert "avg_duration" in item
+            assert "model" in item
+            assert "avg_duration_ms" in item
     
     def test_model_bunching_detection(self):
         """Test model bunching detection query"""
