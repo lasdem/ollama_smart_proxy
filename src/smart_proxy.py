@@ -280,9 +280,13 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
     # --- STREAMING RESPONSE ---
     if stream:
         async def iterator():
+            start_time = time.time()
+            last_model = "unknown"
             async for chunk in response:
                 # Extract content delta
                 content = chunk.choices[0].delta.content or ""
+                if hasattr(chunk, 'model') and chunk.model:
+                    last_model = chunk.model
                 
                 if endpoint_type == EndpointType.OLLAMA_GENERATE:
                     # OLLAMA RAW FORMAT: JSON objects separated by newlines
@@ -307,8 +311,25 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
                     yield f"data: {chunk.model_dump_json()}\n\n"
             
             # End of stream markers
-            if endpoint_type in [EndpointType.OLLAMA_GENERATE, EndpointType.OLLAMA_CHAT]:
-                yield json.dumps({"done": True, "total_duration": 0}) + "\n"
+            duration_ns = int((time.time() - start_time) * 1_000_000_000)
+            
+            if endpoint_type == EndpointType.OLLAMA_GENERATE:
+                yield json.dumps({
+                    "model": last_model,
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "done": True, 
+                    "total_duration": duration_ns,
+                    "response": "",
+                    "context": []
+                }) + "\n"
+            elif endpoint_type == EndpointType.OLLAMA_CHAT:
+                yield json.dumps({
+                    "model": last_model,
+                    "created_at": datetime.utcnow().isoformat() + "Z",
+                    "done": True, 
+                    "total_duration": duration_ns,
+                    "message": {"role": "assistant", "content": ""}
+                }) + "\n"
             else:
                 yield "data: [DONE]\n\n"
 
