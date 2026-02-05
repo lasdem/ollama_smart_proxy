@@ -226,11 +226,13 @@ class ProxyDashboard:
 
     def _make_model_perf(self, data):
         t = Table(title="Avg Wait/Proc (Model)", box=box.SIMPLE, expand=True)
-        t.add_column("Name"); t.add_column("W/P (s)", justify="right")
+        t.add_column("Name")
+        t.add_column("Wait (s)", justify="right")
+        t.add_column("Proc (s)", justify="right")
         for x in data.get('perf_by_model', [])[:5]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
-            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}/{p:.1f}")
+            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}", f"{p:.1f}")
         return t
 
     def _make_top_ips(self, data):
@@ -249,11 +251,13 @@ class ProxyDashboard:
 
     def _make_ip_perf(self, data):
         t = Table(title="Avg Wait/Proc (IP)", box=box.SIMPLE, expand=True)
-        t.add_column("IP"); t.add_column("W/P (s)", justify="right")
+        t.add_column("IP")
+        t.add_column("Wait (s)", justify="right")
+        t.add_column("Proc (s)", justify="right")
         for x in data.get('perf_by_ip', [])[:5]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
-            t.add_row(str(x.get('group', '?')), f"{w:.1f}/{p:.1f}")
+            t.add_row(str(x.get('group', '?')), f"{w:.1f}", f"{p:.1f}")
         return t
 
     def _init_layout(self):
