@@ -56,6 +56,7 @@ services:
       - LOG_FORMAT=json # Options: json, human
       - LOG_LEVEL=INFO
       - ACCESS_LOG_LEVEL=WARNING
+
     logging:
       driver: loki
       options:

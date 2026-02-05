@@ -304,7 +304,7 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
                     
                 else: 
                     # OPENAI FORMAT: "data: {JSON} \n\n"
-                    yield f"data: {chunk.json()}\n\n"
+                    yield f"data: {chunk.model_dump_json()}\n\n"
             
             # End of stream markers
             if endpoint_type in [EndpointType.OLLAMA_GENERATE, EndpointType.OLLAMA_CHAT]:
@@ -441,7 +441,7 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
     # Wait for the Worker to process it
     try:
         response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
-        return response_data, body.get('stream', False)
+        return response_data, body.get('stream', True)
     except asyncio.TimeoutError as e:
         # Clean up active_requests and slot in case of timeout
         async with queue_lock:
@@ -532,7 +532,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
         if not model.startswith("ollama/"):
             model = f"ollama/{model}"
             
-        should_stream = request.body.get('stream', False)
+        should_stream = request.body.get('stream', True)
         
         # 2. Normalize Input for LiteLLM
         req_kwargs = {
