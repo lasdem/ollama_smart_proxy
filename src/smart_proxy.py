@@ -891,6 +891,9 @@ async def proxy_analytics(
             "average_duration_by_model": analytics_repo.get_average_duration_by_model(start_time, end_time),
             "priority_score_distribution": analytics_repo.get_priority_score_distribution(start_time, end_time, group_by),
             "error_rate_analysis": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by),
+            "error_rate_by_ip": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by='ip'),
+            "perf_by_model": analytics_repo.get_performance_stats(start_time, end_time, group_by='model_name'),
+            "perf_by_ip": analytics_repo.get_performance_stats(start_time, end_time, group_by='ip'),
             "model_bunching_detection": analytics_repo.get_model_bunching_detection(start_time, end_time, time_window_seconds=60),
             "requests_over_time": analytics_repo.get_requests_over_time(interval='hour')
         }

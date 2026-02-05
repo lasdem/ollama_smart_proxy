@@ -507,6 +507,59 @@ class AnalyticsQueryBuilder:
         finally:
             session.close()
     
+    def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get performance statistics (wait time, processing time, total duration)
+        
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'ip'
+            
+        Returns:
+            List[Dict]: List of performance statistics
+        """
+        try:
+            session = self.db.get_session()
+            
+            if group_by == 'ip':
+                group_col = 'source_ip'
+            else:
+                group_col = 'model_name'
+            
+            result = session.execute(text(f"""
+                SELECT 
+                    {group_col} as group_key,
+                    AVG(queue_wait_seconds) as avg_wait,
+                    AVG(processing_time_seconds) as avg_proc,
+                    AVG(duration_seconds) as avg_total,
+                    COUNT(*) as count
+                FROM request_logs
+                WHERE timestamp_received BETWEEN :start_time AND :end_time
+                    AND status = 'completed'
+                GROUP BY group_key
+                ORDER BY avg_total DESC
+            """), {
+                "start_time": start_time,
+                "end_time": end_time
+            }).fetchall()
+            
+            return [
+                {
+                    "group": row[0],
+                    "avg_wait_seconds": row[1],
+                    "avg_processing_seconds": row[2],
+                    "avg_total_seconds": row[3],
+                    "count": row[4]
+                }
+                for row in result
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get performance stats: {e}")
+            raise
+        finally:
+            session.close()
+
     def get_request_count_by_ip(self, start_time: datetime, end_time: datetime, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Get request count by IP address
@@ -550,6 +603,59 @@ class AnalyticsQueryBuilder:
         finally:
             session.close()
     
+    def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get performance statistics (wait time, processing time, total duration)
+        
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'ip'
+            
+        Returns:
+            List[Dict]: List of performance statistics
+        """
+        try:
+            session = self.db.get_session()
+            
+            if group_by == 'ip':
+                group_col = 'source_ip'
+            else:
+                group_col = 'model_name'
+            
+            result = session.execute(text(f"""
+                SELECT 
+                    {group_col} as group_key,
+                    AVG(queue_wait_seconds) as avg_wait,
+                    AVG(processing_time_seconds) as avg_proc,
+                    AVG(duration_seconds) as avg_total,
+                    COUNT(*) as count
+                FROM request_logs
+                WHERE timestamp_received BETWEEN :start_time AND :end_time
+                    AND status = 'completed'
+                GROUP BY group_key
+                ORDER BY avg_total DESC
+            """), {
+                "start_time": start_time,
+                "end_time": end_time
+            }).fetchall()
+            
+            return [
+                {
+                    "group": row[0],
+                    "avg_wait_seconds": row[1],
+                    "avg_processing_seconds": row[2],
+                    "avg_total_seconds": row[3],
+                    "count": row[4]
+                }
+                for row in result
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get performance stats: {e}")
+            raise
+        finally:
+            session.close()
+
     def get_average_duration_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
         """
         Get average duration by model

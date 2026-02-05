@@ -360,6 +360,18 @@ class AnalyticsRepository:
         """
         return self.analytics.get_request_count_by_ip(start_time, end_time, limit)
     
+    def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
+        """
+        Get performance statistics grouped by model or ip
+        Args:
+            start_time: Start time for query
+            end_time: End time for query
+            group_by: 'model_name' or 'ip'
+        Returns:
+            List[Dict]: Performance stats
+        """
+        return self.analytics.get_performance_stats(start_time, end_time, group_by)
+
     def get_average_duration_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
         """
         Get average duration by model

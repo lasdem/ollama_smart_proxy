@@ -207,43 +207,51 @@ class ProxyDashboard:
             
         return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})")
 
-    def _make_analytics_tables(self, data):
-        """Returns exactly 4 renderables, filling empty slots if needed"""
-        results = []
-        
-        # 1. Models Table
-        t1 = Table(title="Top Models", box=box.SIMPLE, expand=True)
-        t1.add_column("Name"); t1.add_column("Reqs", justify="right")
+    def _make_top_models(self, data):
+        t = Table(title="Top Models", box=box.SIMPLE, expand=True)
+        t.add_column("Name"); t.add_column("Reqs", justify="right")
         for x in data.get('request_count_by_model', [])[:5]:
-            t1.add_row(x['model'], str(x['request_count']))
-        results.append(t1)
-        
-        # 2. IPs Table
-        t2 = Table(title="Top IPs", box=box.SIMPLE, expand=True)
-        t2.add_column("IP"); t2.add_column("Reqs", justify="right")
-        for x in data.get('request_count_by_ip', [])[:5]:
-            t2.add_row(x.get('ip_address','?'), str(x.get('request_count',0)))
-        results.append(t2)
-        
-        # 3. Errors
-        t3 = Table(title="Errors", box=box.SIMPLE, expand=True)
-        t3.add_column("Grp"); t3.add_column("%", justify="right")
+            t.add_row(x['model'], str(x['request_count']))
+        return t
+
+    def _make_model_errors(self, data):
+        t = Table(title="Errors by Model", box=box.SIMPLE, expand=True)
+        t.add_column("Name"); t.add_column("%", justify="right")
         for x in data.get('error_rate_analysis', [])[:5]:
-            t3.add_row(str(x.get('group')), f"{x.get('error_rate_percent',0):.1f}%")
-        results.append(t3)
-        
-        # 4. Priority
-        t4 = Table(title="Priority", box=box.SIMPLE, expand=True)
-        t4.add_column("Grp"); t4.add_column("Avg", justify="right")
-        for x in data.get('priority_score_distribution', [])[:5]:
-            t4.add_row(str(x.get('group')), f"{x.get('avg_score',0):.1f}")
-        results.append(t4)
-        
-        # Fill missing slots to maintain geometry
-        while len(results) < 4:
-            results.append(Text(""))
-            
-        return results
+             t.add_row(str(x.get('group', '?'))[:20], f"{x.get('error_rate_percent',0):.1f}%")
+        return t
+
+    def _make_model_perf(self, data):
+        t = Table(title="Avg Wait/Proc (Model)", box=box.SIMPLE, expand=True)
+        t.add_column("Name"); t.add_column("W/P (s)", justify="right")
+        for x in data.get('perf_by_model', [])[:5]:
+            w = x.get('avg_wait_seconds', 0)
+            p = x.get('avg_processing_seconds', 0)
+            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}/{p:.1f}")
+        return t
+
+    def _make_top_ips(self, data):
+        t = Table(title="Top IPs", box=box.SIMPLE, expand=True)
+        t.add_column("IP"); t.add_column("Reqs", justify="right")
+        for x in data.get('request_count_by_ip', [])[:5]:
+            t.add_row(x.get('ip_address','?'), str(x.get('request_count',0)))
+        return t
+
+    def _make_ip_errors(self, data):
+        t = Table(title="Errors by IP", box=box.SIMPLE, expand=True)
+        t.add_column("IP"); t.add_column("%", justify="right")
+        for x in data.get('error_rate_by_ip', [])[:5]:
+            t.add_row(str(x.get('group', '?')), f"{x.get('error_rate_percent',0):.1f}%")
+        return t
+
+    def _make_ip_perf(self, data):
+        t = Table(title="Avg Wait/Proc (IP)", box=box.SIMPLE, expand=True)
+        t.add_column("IP"); t.add_column("W/P (s)", justify="right")
+        for x in data.get('perf_by_ip', [])[:5]:
+            w = x.get('avg_wait_seconds', 0)
+            p = x.get('avg_processing_seconds', 0)
+            t.add_row(str(x.get('group', '?')), f"{w:.1f}/{p:.1f}")
+        return t
 
     def _init_layout(self):
         """Initialize the static layout tree once"""
@@ -256,9 +264,10 @@ class ProxyDashboard:
             Layout(name="footer", size=3)
         )
         
-        # Body split Left/Right
+        # Body split Left/Middle/Right
         self.layout["body"].split_row(
             Layout(name="left", ratio=1),
+            Layout(name="middle", ratio=1),
             Layout(name="right", ratio=1)
         )
         
@@ -268,14 +277,19 @@ class ProxyDashboard:
             Layout(name="vram", ratio=1),
             Layout(name="queue", ratio=2)
         )
+
+        # Middle side (Model Analytics)
+        self.layout["middle"].split_column(
+            Layout(name="m1", ratio=1),
+            Layout(name="m2", ratio=1),
+            Layout(name="m3", ratio=1)
+        )
         
-        # Right side: 4 FIXED slots for analytics
-        # We create them now so the tree structure never changes
+        # Right side (IP Analytics)
         self.layout["right"].split_column(
-            Layout(name="a1", ratio=1),
-            Layout(name="a2", ratio=1),
-            Layout(name="a3", ratio=1),
-            Layout(name="a4", ratio=1)
+            Layout(name="r1", ratio=1),
+            Layout(name="r2", ratio=1),
+            Layout(name="r3", ratio=1)
         )
         
         # Set initial content
@@ -319,12 +333,15 @@ class ProxyDashboard:
                             self.layout["vram"].update(self._make_vram(data['vram']))
                             self.layout["queue"].update(self._make_queue(data['queue']))
                             
-                            # Right Column (Analytics)
-                            tables = self._make_analytics_tables(data['analytics'])
-                            self.layout["a1"].update(tables[0])
-                            self.layout["a2"].update(tables[1])
-                            self.layout["a3"].update(tables[2])
-                            self.layout["a4"].update(tables[3])
+                            # Middle Column (Model Analytics)
+                            self.layout["m1"].update(self._make_top_models(data['analytics']))
+                            self.layout["m2"].update(self._make_model_errors(data['analytics']))
+                            self.layout["m3"].update(self._make_model_perf(data['analytics']))
+
+                            # Right Column (IP Analytics)
+                            self.layout["r1"].update(self._make_top_ips(data['analytics']))
+                            self.layout["r2"].update(self._make_ip_errors(data['analytics']))
+                            self.layout["r3"].update(self._make_ip_perf(data['analytics']))
                     
                     time.sleep(0.1)
         except KeyboardInterrupt:
