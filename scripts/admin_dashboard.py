@@ -192,15 +192,18 @@ class ProxyDashboard:
         if not data or "error" in data: return Panel("Error", title="Queue")
         
         t = Table(box=None, expand=True, show_header=True, padding=(0,1))
-        t.add_column("St", width=2); t.add_column("Model"); t.add_column("Wait", justify="right")
+        t.add_column("St", width=2)
+        t.add_column("Model")
+        t.add_column("IP", style="dim")
+        t.add_column("Wait", justify="right")
         
         reqs = data.get('requests', [])
         reqs.sort(key=lambda x: (0 if x.get('status')=='processing' else 1, x.get('priority',999)))
         
-        for r in reqs[:8]:
+        for r in reqs[:25]:
             icon = "⚡" if r.get('status') == 'processing' else "⏳"
             dur = r.get('wait_time', r.get('total_duration',0))
-            t.add_row(icon, r.get('model','?')[:15], f"{dur}s")
+            t.add_row(icon, r.get('model','?')[:20], r.get('ip','?')[:15], f"{dur}s")
             
         if not reqs:
             return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})")
@@ -218,7 +221,7 @@ class ProxyDashboard:
         t = Table(title="Errors by Model", box=box.SIMPLE, expand=True)
         t.add_column("Name"); t.add_column("%", justify="right")
         for x in data.get('error_rate_analysis', [])[:5]:
-             t.add_row(str(x.get('group', '?'))[:20], f"{x.get('error_rate_percent',0):.1f}%")
+             t.add_row(str(x.get('group', '?'))[:40], f"{x.get('error_rate_percent',0):.1f}%")
         return t
 
     def _make_model_perf(self, data):
@@ -273,9 +276,9 @@ class ProxyDashboard:
         
         # Left side: Fixed slots for Health, VRAM, Queue
         self.layout["left"].split_column(
-            Layout(name="health", ratio=1),
+            Layout(name="health", size=8),
             Layout(name="vram", ratio=1),
-            Layout(name="queue", ratio=2)
+            Layout(name="queue", ratio=3)
         )
 
         # Middle side (Model Analytics)

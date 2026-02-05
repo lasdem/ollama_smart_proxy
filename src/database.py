@@ -375,6 +375,8 @@ class AnalyticsQueryBuilder:
             session = self.db.get_session()
             if group_by == 'model_name':
                 group_col = 'model_name'
+            elif group_by == 'ip':
+                group_col = 'source_ip'
             elif group_by == 'hour':
                 group_col = self.db._get_date_trunc_expr('hour')
             else:
