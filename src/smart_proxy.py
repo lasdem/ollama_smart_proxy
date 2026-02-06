@@ -1,6 +1,6 @@
 """
-Smart Proxy for Ollama
-Version: 3.7.1
+Smart Proxy for Ollama - Pure HTTP Proxy with Smart Queueing
+Version: 4.0
 Date: 2026-02-06
 """
 import asyncio
@@ -14,11 +14,9 @@ from datetime import datetime
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, Body
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
-import litellm
-from litellm import acompletion
 from dotenv import load_dotenv
 
 from vram_monitor import VRAMMonitor
@@ -77,8 +75,6 @@ authorized_ips: Dict[str, float] = {}
 # Paths that require protection
 ADMIN_PATHS = ["api/pull", "api/push", "api/create", "api/copy", "api/delete", "api/blobs"]
 
-litellm.drop_params = True
-
 # Initialize database and repositories
 init_db()
 init_repositories()
@@ -87,11 +83,7 @@ load_dotenv()
 
 request_repo = get_request_log_repo()
 
-class EndpointType(Enum):
-    OLLAMA_CHAT = "ollama_chat"       # /api/chat
-    OLLAMA_GENERATE = "ollama_gen"    # /api/generate
-    OPENAI_CHAT = "openai_chat"       # /v1/chat/completions
-    OPENAI_LEGACY = "openai_legacy"   # /v1/completions
+# We don't need endpoint type differentiation anymore - all requests forwarded as-is
 
 @dataclass
 class QueuedRequest:
@@ -100,8 +92,9 @@ class QueuedRequest:
     ip: str
     model_name: str
     body: dict
+    raw_request: Request  # Store the raw FastAPI request
+    path: str  # Store the endpoint path
     future: asyncio.Future
-    endpoint_type: EndpointType
     
     def __repr__(self):
         wait_time = int(time.time() - self.timestamp)
@@ -271,109 +264,6 @@ def generate_request_id(ip: str, model: str) -> str:
     
     return req_id
 
-def format_output(response, stream: bool, endpoint_type: EndpointType):
-    """
-    Takes the standardized LiteLLM response and formats it 
-    according to the endpoint that was called.
-    """
-    
-    # --- STREAMING RESPONSE ---
-    if stream:
-        async def iterator():
-            start_time = time.time()
-            last_model = "unknown"
-            async for chunk in response:
-                # Extract delta information
-                delta = chunk.choices[0].delta
-                content = delta.content or ""
-                if hasattr(chunk, 'model') and chunk.model:
-                    last_model = chunk.model
-                
-                if endpoint_type == EndpointType.OLLAMA_GENERATE:
-                    # OLLAMA RAW FORMAT: JSON objects separated by newlines
-                    yield json.dumps({
-                        "model": chunk.model,
-                        "created_at": datetime.utcnow().isoformat() + "Z",
-                        "response": content,
-                        "done": False
-                    }) + "\n"
-                    
-                elif endpoint_type == EndpointType.OLLAMA_CHAT:
-                    # OLLAMA CHAT FORMAT - include tool_calls if present
-                    message_dict = {"role": "assistant", "content": content}
-                    if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                        message_dict["tool_calls"] = [tc.model_dump() for tc in delta.tool_calls]
-                    
-                    yield json.dumps({
-                        "model": chunk.model,
-                        "created_at": datetime.utcnow().isoformat() + "Z",
-                        "message": message_dict,
-                        "done": False
-                    }) + "\n"
-                    
-                else: 
-                    # OPENAI FORMAT: "data: {JSON} \n\n" (preserves tool_calls automatically)
-                    yield f"data: {chunk.model_dump_json()}\n\n"
-            
-            # End of stream markers
-            duration_ns = int((time.time() - start_time) * 1_000_000_000)
-            
-            if endpoint_type == EndpointType.OLLAMA_GENERATE:
-                yield json.dumps({
-                    "model": last_model,
-                    "created_at": datetime.utcnow().isoformat() + "Z",
-                    "done": True, 
-                    "total_duration": duration_ns,
-                    "response": "",
-                    "context": []
-                }) + "\n"
-            elif endpoint_type == EndpointType.OLLAMA_CHAT:
-                yield json.dumps({
-                    "model": last_model,
-                    "created_at": datetime.utcnow().isoformat() + "Z",
-                    "done": True, 
-                    "total_duration": duration_ns,
-                    "message": {"role": "assistant", "content": ""}
-                }) + "\n"
-            else:
-                yield "data: [DONE]\n\n"
-
-        media_type = "application/x-ndjson" if "ollama" in endpoint_type.value else "text/event-stream"
-        return StreamingResponse(iterator(), media_type=media_type)
-
-    # --- NON-STREAMING RESPONSE ---
-    else:
-        # Extract full message (including tool_calls if present)
-        message = response.choices[0].message
-        full_content = message.content or ""  # Content can be None when tool_calls are used
-        
-        if endpoint_type == EndpointType.OLLAMA_GENERATE:
-            # Convert to Ollama /api/generate format
-            return JSONResponse({
-                "model": response.model,
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "response": full_content,
-                "done": True,
-                "context": [] # LiteLLM doesn't easily return context ints, mostly unused now
-            })
-            
-        elif endpoint_type == EndpointType.OLLAMA_CHAT:
-            # Convert to Ollama /api/chat format - preserve tool_calls if present
-            message_dict = {"role": "assistant", "content": full_content}
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                message_dict["tool_calls"] = [tc.model_dump() for tc in message.tool_calls]
-            
-            return JSONResponse({
-                "model": response.model,
-                "created_at": datetime.utcnow().isoformat() + "Z",
-                "message": message_dict,
-                "done": True
-            })
-            
-        else:
-            # Return OpenAI standard format directly (preserves tool_calls, finish_reason, etc.)
-            return JSONResponse(content=response.model_dump())
-
 def verify_admin_access(request: Request):
     """
     Check if the request is authorized via:
@@ -409,7 +299,7 @@ def verify_admin_access(request: Request):
         detail="Restricted endpoint. Please authenticate via /proxy/auth or use X-Admin-Key header."
     )
 
-async def enqueue_request(request: Request, endpoint_type: EndpointType):
+async def enqueue_request(request: Request, path: str):
     """Shared logic for all endpoints to handle validation, logging, and queuing"""
     try:
         body = await request.json()
@@ -438,8 +328,9 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
         ip=client_ip,
         model_name=model_name,
         body=body,
-        future=future,
-        endpoint_type=endpoint_type # <--- Store the type
+        raw_request=request,
+        path=path,
+        future=future
     )
     
     # Extract prompt for logging based on type
@@ -467,22 +358,15 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
         if current_depth > stats["queue_depth_max"]:
             stats["queue_depth_max"] = current_depth
     
-    logger.info(f"[{req_id}] Queued via {endpoint_type.value}", extra={"event": "queued"})
+    logger.info(f"[{req_id}] Queued for {path}", extra={"event": "queued"})
     
     # Wait for the Worker to process it
     try:
-        response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
-        # Determine stream default based on endpoint type
-        # OpenAI endpoints default to False, Ollama endpoints default to True
-        if endpoint_type in [EndpointType.OPENAI_CHAT, EndpointType.OPENAI_LEGACY]:
-            should_stream = body.get('stream', False)
-        else:
-            should_stream = body.get('stream', True)
-        return response_data, should_stream
+        response = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
+        return response
     except asyncio.TimeoutError as e:
         # Clean up active_requests and slot in case of timeout
         async with queue_lock:
-            # Find and remove from active_requests if present
             if req_id in active_requests:
                 del active_requests[req_id]
         tracker.remove_request(client_ip, model_name)
@@ -544,6 +428,7 @@ async def queue_worker():
         asyncio.create_task(process_request(selected_request, priority_score))
 
 async def process_request(request: QueuedRequest, priority_score: int):
+    """Forward raw HTTP request to Ollama and stream response back"""
     start_time = time.time()
     model_was_loaded = tracker.is_model_loaded(request.model_name)
     
@@ -564,93 +449,81 @@ async def process_request(request: QueuedRequest, priority_score: int):
     )
     
     try:
-        # 1. Normalize Model Name
-        model = request.model_name
-        if not model.startswith("ollama/"):
-            model = f"ollama/{model}"
+        # Forward request to Ollama as-is
+        base_url = OLLAMA_API_BASE.rstrip("/")
+        target_url = f"{base_url}/{request.path.lstrip('/')}"
+        
+        if request.raw_request.url.query:
+            target_url += f"?{request.raw_request.url.query}"
+
+        # Filter headers
+        headers = dict(request.raw_request.headers)
+        headers.pop("host", None)
+        headers.pop("content-length", None)
+
+        client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
+
+        try:
+            # Build and send request with the body we already parsed
+            req = client.build_request(
+                request.raw_request.method,
+                target_url,
+                headers=headers,
+                json=request.body  # Use the parsed body
+            )
+            r = await client.send(req, stream=True)
             
-        should_stream = request.body.get('stream', True)
-        
-        # 2. Normalize Input for LiteLLM
-        req_kwargs = {
-            "model": model,
-            "stream": should_stream,
-            "api_base": OLLAMA_API_BASE,
-            "timeout": REQUEST_TIMEOUT
-        }
-        
-        if request.endpoint_type in [EndpointType.OLLAMA_GENERATE, EndpointType.OPENAI_LEGACY]:
-            # Raw generation request
-            if 'prompt' in request.body:
-                req_kwargs['messages'] = [{"role": "user", "content": request.body['prompt']}]
-            else:
-                req_kwargs['messages'] = [{"role": "user", "content": ""}]
-        else:
-            # Chat request
-            req_kwargs['messages'] = request.body.get('messages', [])
-        
-        # 2b. Passthrough all other parameters (tools, temperature, etc.)
-        # Exclude parameters we've already handled explicitly
-        handled_params = {'model', 'stream', 'messages', 'prompt'}
-        for key, value in request.body.items():
-            if key not in handled_params:
-                req_kwargs[key] = value
-
-        # 3. Execute
-        response = await acompletion(**req_kwargs)
-
-        # Extract response text for logging (non-streaming only)
-        response_text = None
-        if not should_stream:
-            # LiteLLM standardizes responses to have choices[0].message
-            if hasattr(response, 'choices') and len(response.choices) > 0:
-                message = response.choices[0].message
-                # Handle tool calls (content may be None)
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    # Log tool calls instead of content
-                    tool_names = [tc.function.name for tc in message.tool_calls]
-                    response_text = f"[TOOL_CALLS: {', '.join(tool_names)}]"
-                else:
-                    response_text = message.content
-        
-        # If model wasn't loaded before, trigger immediate VRAM poll
-        if not model_was_loaded:
-            async def delayed_poll():
-                await asyncio.sleep(1.0)
-                await vram_monitor.poll_now()
-                logger.info(
-                    f"[{request.request_id}]",
-                    extra={"event": "vram_poll", "request_id": request.request_id}
-                )
-            asyncio.create_task(delayed_poll())
-        
-        # 4. Set Result
-        request.future.set_result(response)
-        stats["completed_requests"] += 1
-        processing_time = time.time() - start_time
-        total_duration = time.time() - request.timestamp
-        
-        # Log completion
-        await asyncio.to_thread(
-            request_repo.log_request,
-            request.request_id,
-            request.ip,
-            request.model_name,
-            "completed",
-            total_duration,
-            priority_score,
-            response_text=response_text, 
-            processing_time_seconds=processing_time
-        )
-        
-        logger.info(
-            f"[{request.request_id}]",
-            extra={
-                "event": "request_completed",
-                "request_id": request.request_id,
-                "duration_seconds": round(total_duration, 2)
-            }
-        )
+            # Create streaming response
+            response = StreamingResponse(
+                r.aiter_raw(),
+                status_code=r.status_code,
+                headers=dict(r.headers),
+                background=BackgroundTask(r.aclose)
+            )
+            
+            # If model wasn't loaded before, trigger immediate VRAM poll
+            if not model_was_loaded:
+                async def delayed_poll():
+                    await asyncio.sleep(1.0)
+                    await vram_monitor.poll_now()
+                    logger.info(
+                        f"[{request.request_id}]",
+                        extra={"event": "vram_poll", "request_id": request.request_id}
+                    )
+                asyncio.create_task(delayed_poll())
+            
+            # Set Result
+            request.future.set_result(response)
+            stats["completed_requests"] += 1
+            processing_time = time.time() - start_time
+            total_duration = time.time() - request.timestamp
+            
+            # Log completion (metadata only, no response parsing)
+            await asyncio.to_thread(
+                request_repo.log_request,
+                request.request_id,
+                request.ip,
+                request.model_name,
+                "completed",
+                total_duration,
+                priority_score,
+                response_text=f"[HTTP {r.status_code}]",  # Just log status code
+                processing_time_seconds=processing_time
+            )
+            
+            logger.info(
+                f"[{request.request_id}]",
+                extra={
+                    "event": "request_completed",
+                    "request_id": request.request_id,
+                    "duration_seconds": round(total_duration, 2),
+                    "status_code": r.status_code
+                }
+            )
+            
+        except Exception as http_error:
+            await client.aclose()
+            raise http_error
         
     except Exception as e:
         processing_time = time.time() - start_time
@@ -746,27 +619,23 @@ async def lifespan(app: FastAPI):
     logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 
 
-app = FastAPI(title="Ollama Smart Proxy", version="3.7.1", lifespan=lifespan)
+app = FastAPI(title="Ollama Smart Proxy", version="4.0", lifespan=lifespan)
 
 @app.post("/api/chat")
 async def handle_ollama_chat(request: Request):
-    response, stream = await enqueue_request(request, EndpointType.OLLAMA_CHAT)
-    return format_output(response, stream, EndpointType.OLLAMA_CHAT)
+    return await enqueue_request(request, "api/chat")
 
 @app.post("/api/generate")
 async def handle_ollama_gen(request: Request):
-    response, stream = await enqueue_request(request, EndpointType.OLLAMA_GENERATE)
-    return format_output(response, stream, EndpointType.OLLAMA_GENERATE)
+    return await enqueue_request(request, "api/generate")
 
 @app.post("/v1/chat/completions")
 async def handle_openai_chat(request: Request):
-    response, stream = await enqueue_request(request, EndpointType.OPENAI_CHAT)
-    return format_output(response, stream, EndpointType.OPENAI_CHAT)
+    return await enqueue_request(request, "v1/chat/completions")
 
 @app.post("/v1/completions")
 async def handle_openai_legacy(request: Request):
-    response, stream = await enqueue_request(request, EndpointType.OPENAI_LEGACY)
-    return format_output(response, stream, EndpointType.OPENAI_LEGACY)
+    return await enqueue_request(request, "v1/completions")
 
 
 # Smart Proxy Specific Endpoints
@@ -774,16 +643,15 @@ async def handle_openai_legacy(request: Request):
 async def root():
     return {
         "service": "Ollama Smart Proxy",
-        "version": "3.7.1",
+        "version": "4.0",
         "features": [
             "VRAM-aware priority queue",
             "Model affinity scheduling",
             "IP-based fairness",
             "Wait time starvation prevention",
             "Request ID tracking",
-            "Full tool/function calling support",
-            "Streaming & non-streaming responses",
-            "OpenAI & Ollama API compatibility"
+            "Pure HTTP proxy - zero manipulation",
+            "Full Ollama API compatibility"
         ]
     }
 

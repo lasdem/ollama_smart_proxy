@@ -182,7 +182,7 @@ class ProxyDashboard:
         
         for m, info in list(models.items())[:4]: # Limit to 4 lines to prevent jitter
             sz = info.get('vram_mb',0) if isinstance(info, dict) else 0
-            t.add_row(m[:20], f"{sz/1024:.1f}GB")
+            t.add_row(m[:40], f"{sz/1024:.1f}GB")
         
         # Container Grid
         container = Table.grid(expand=True)

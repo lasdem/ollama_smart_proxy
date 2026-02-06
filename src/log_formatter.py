@@ -252,19 +252,12 @@ def setup_logging(level: str = "INFO", access_level: str = None):
         for h in l.handlers[:]:
             l.removeHandler(h)
 
-    # LiteLLM -> Silence INFO logs, only show WARNING/ERROR
-    # Added "LiteLLM" (capitalized) which is the source of the duplication
-    litellm_loggers = [
-        "litellm", "LiteLLM", "litellm.proxy", "litellm.auth", 
-        "litellm.usage", "litellm.cache", "litellm.telemetry"
-    ]
-    for name in litellm_loggers:
-        l = logging.getLogger(name)
-        l.setLevel(logging.WARNING) # Force this to WARNING to kill the spam
-        l.propagate = True
-        # Remove the default handler LiteLLM adds (kills the first duplicate line)
-        for h in l.handlers[:]:
-            l.removeHandler(h)
+    # httpx -> Follow ACCESS_LOG_LEVEL (used for VRAM polling and proxy requests)
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.setLevel(access_log_level)
+    httpx_logger.propagate = True
+    for h in httpx_logger.handlers[:]:
+        httpx_logger.removeHandler(h)
 
     # App Logger
     app_logger = logging.getLogger("smart_proxy")
