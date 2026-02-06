@@ -1,6 +1,6 @@
 """
 Smart Proxy for Ollama
-Version: 3.7
+Version: 3.7.1
 Date: 2026-02-06
 """
 import asyncio
@@ -283,8 +283,9 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
             start_time = time.time()
             last_model = "unknown"
             async for chunk in response:
-                # Extract content delta
-                content = chunk.choices[0].delta.content or ""
+                # Extract delta information
+                delta = chunk.choices[0].delta
+                content = delta.content or ""
                 if hasattr(chunk, 'model') and chunk.model:
                     last_model = chunk.model
                 
@@ -298,16 +299,20 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
                     }) + "\n"
                     
                 elif endpoint_type == EndpointType.OLLAMA_CHAT:
-                    # OLLAMA CHAT FORMAT
+                    # OLLAMA CHAT FORMAT - include tool_calls if present
+                    message_dict = {"role": "assistant", "content": content}
+                    if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                        message_dict["tool_calls"] = [tc.model_dump() for tc in delta.tool_calls]
+                    
                     yield json.dumps({
                         "model": chunk.model,
                         "created_at": datetime.utcnow().isoformat() + "Z",
-                        "message": {"role": "assistant", "content": content},
+                        "message": message_dict,
                         "done": False
                     }) + "\n"
                     
                 else: 
-                    # OPENAI FORMAT: "data: {JSON} \n\n"
+                    # OPENAI FORMAT: "data: {JSON} \n\n" (preserves tool_calls automatically)
                     yield f"data: {chunk.model_dump_json()}\n\n"
             
             # End of stream markers
@@ -338,8 +343,9 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
 
     # --- NON-STREAMING RESPONSE ---
     else:
-        # Extract full content
-        full_content = response.choices[0].message.content
+        # Extract full message (including tool_calls if present)
+        message = response.choices[0].message
+        full_content = message.content or ""  # Content can be None when tool_calls are used
         
         if endpoint_type == EndpointType.OLLAMA_GENERATE:
             # Convert to Ollama /api/generate format
@@ -352,16 +358,20 @@ def format_output(response, stream: bool, endpoint_type: EndpointType):
             })
             
         elif endpoint_type == EndpointType.OLLAMA_CHAT:
-            # Convert to Ollama /api/chat format
+            # Convert to Ollama /api/chat format - preserve tool_calls if present
+            message_dict = {"role": "assistant", "content": full_content}
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                message_dict["tool_calls"] = [tc.model_dump() for tc in message.tool_calls]
+            
             return JSONResponse({
                 "model": response.model,
                 "created_at": datetime.utcnow().isoformat() + "Z",
-                "message": {"role": "assistant", "content": full_content},
+                "message": message_dict,
                 "done": True
             })
             
         else:
-            # Return OpenAI standard format directly
+            # Return OpenAI standard format directly (preserves tool_calls, finish_reason, etc.)
             return JSONResponse(content=response.model_dump())
 
 def verify_admin_access(request: Request):
@@ -462,7 +472,13 @@ async def enqueue_request(request: Request, endpoint_type: EndpointType):
     # Wait for the Worker to process it
     try:
         response_data = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
-        return response_data, body.get('stream', True)
+        # Determine stream default based on endpoint type
+        # OpenAI endpoints default to False, Ollama endpoints default to True
+        if endpoint_type in [EndpointType.OPENAI_CHAT, EndpointType.OPENAI_LEGACY]:
+            should_stream = body.get('stream', False)
+        else:
+            should_stream = body.get('stream', True)
+        return response_data, should_stream
     except asyncio.TimeoutError as e:
         # Clean up active_requests and slot in case of timeout
         async with queue_lock:
@@ -586,9 +602,16 @@ async def process_request(request: QueuedRequest, priority_score: int):
         # Extract response text for logging (non-streaming only)
         response_text = None
         if not should_stream:
-            # LiteLLM standardizes responses to have choices[0].message.content
+            # LiteLLM standardizes responses to have choices[0].message
             if hasattr(response, 'choices') and len(response.choices) > 0:
-                response_text = response.choices[0].message.content
+                message = response.choices[0].message
+                # Handle tool calls (content may be None)
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    # Log tool calls instead of content
+                    tool_names = [tc.function.name for tc in message.tool_calls]
+                    response_text = f"[TOOL_CALLS: {', '.join(tool_names)}]"
+                else:
+                    response_text = message.content
         
         # If model wasn't loaded before, trigger immediate VRAM poll
         if not model_was_loaded:
@@ -723,7 +746,7 @@ async def lifespan(app: FastAPI):
     logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 
 
-app = FastAPI(title="Ollama Smart Proxy", version="3.7", lifespan=lifespan)
+app = FastAPI(title="Ollama Smart Proxy", version="3.7.1", lifespan=lifespan)
 
 @app.post("/api/chat")
 async def handle_ollama_chat(request: Request):
@@ -751,14 +774,16 @@ async def handle_openai_legacy(request: Request):
 async def root():
     return {
         "service": "Ollama Smart Proxy",
-        "version": "3.7",
+        "version": "3.7.1",
         "features": [
             "VRAM-aware priority queue",
             "Model affinity scheduling",
             "IP-based fairness",
             "Wait time starvation prevention",
             "Request ID tracking",
-            "Tool/function calling support"
+            "Full tool/function calling support",
+            "Streaming & non-streaming responses",
+            "OpenAI & Ollama API compatibility"
         ]
     }
 

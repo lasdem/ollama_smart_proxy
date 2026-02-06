@@ -44,20 +44,32 @@ See latest changelog: `docs/changelog/v3.7_TOOL_CALLING_FIX.md`
 
 ### v3.7 - Tool Calling Support Fix ✅
 
-#### Issue
+#### v3.7.0 - Parameter Passthrough
 - VSCode extensions (like Kilo Code) got "MODEL_NO_TOOLS_USED" errors through proxy
 - Direct Ollama connection worked fine
 - Models with tool capabilities couldn't use them through proxy
 
-#### Solution
+**Solution:**
 - [x] Implemented parameter passthrough for all request body parameters
 - [x] Excluded only explicitly handled params (model, stream, messages, prompt)
 - [x] Now forwards: tools, tool_choice, temperature, max_tokens, and all other params
 - [x] Maintained safety with `litellm.drop_params = True`
 
+#### v3.7.1 - Response Format & Streaming Fixes
+- After parameter fix, users got "Unexpected API Response" errors
+- Tool call responses weren't properly formatted
+- Streaming defaults incorrect for OpenAI endpoints
+
+**Solutions:**
+- [x] Preserve `tool_calls` in both streaming and non-streaming responses
+- [x] Handle `None` content when tool calls are present
+- [x] Fix streaming defaults: OpenAI=False, Ollama=True
+- [x] Improve logging to capture tool call information
+- [x] Update response formatting for all endpoint types
+
 #### Files Changed
-- [x] `src/smart_proxy.py` - Added passthrough logic in process_request()
-- [x] `docs/changelog/v3.7_TOOL_CALLING_FIX.md` - Full documentation
+- [x] `src/smart_proxy.py` - Parameter passthrough, response formatting, streaming defaults, logging
+- [x] `docs/changelog/v3.7_TOOL_CALLING_FIX.md` - Complete documentation with v3.7.1 updates
 
 ### v3.6 - Admin Dashboard & Analytics API ✅
 
