@@ -124,10 +124,10 @@ class ProxyDashboard:
                 v_data = self.fetch_json("vram")
                 a_data = self.fetch_json("analytics", params={"hours": hours, "limit": self.DISPLAY_LIMIT})
                 
-                # Fetch recent completed/failed requests using new query_db endpoint
+                # Fetch recent completed/error requests using new query_db endpoint
                 r_data = self.fetch_json("query_db", params={
                     "limit": self.RECENT_LIMIT,
-                    "status": "completed,failed",
+                    "status": "completed,error",
                     "sort_by": "timestamp_completed",
                     "sort_order": "desc",
                     "fields": "request_id,model,ip_address,status,processing_time_seconds,timestamp_completed"
@@ -235,7 +235,7 @@ class ProxyDashboard:
         return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
 
     def _make_recent_requests(self, data):
-        """Display last 5 completed/failed requests"""
+        """Display last 5 completed/error requests"""
         if not data or "error" in data:
             return Panel("No Data", title="Recent Requests")
         
@@ -251,12 +251,15 @@ class ProxyDashboard:
         for r in recent[:self.RECENT_LIMIT]:
             # Determine icon based on status
             status = r.get('status', 'unknown')
-            if status == 'completed' or status == 'success':
+            if status in ('completed', 'success'):
                 icon = "✓"
                 style = "green"
-            else:
+            elif status in ('error', 'failed'):
                 icon = "✗"
                 style = "red"
+            else:
+                icon = "?"
+                style = "yellow"
             
             model = r.get('model', '?')[:self.MODEL_DISPLAY_LIMIT]
             ip = r.get('ip_address', '?')[:self.IP_DISPLAY_LIMIT]
