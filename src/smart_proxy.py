@@ -444,9 +444,17 @@ async def process_request(request: QueuedRequest, priority_score: int):
             
             # Set Result
             request.future.set_result(response)
-            stats["completed_requests"] += 1
             processing_time = time.time() - start_time
             total_duration = time.time() - request.timestamp
+            
+            # Check if response indicates an error (4xx or 5xx status codes)
+            is_error = r.status_code >= 400
+            status = "error" if is_error else "completed"
+            
+            if is_error:
+                stats["failed_requests"] += 1
+            else:
+                stats["completed_requests"] += 1
             
             # Log completion (metadata only, no response parsing)
             await asyncio.to_thread(
@@ -454,7 +462,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 request.request_id,
                 request.ip,
                 request.model_name,
-                "completed",
+                status,
                 total_duration,
                 priority_score,
                 response_text=f"[HTTP {r.status_code}]",  # Just log status code
@@ -464,7 +472,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
             logger.info(
                 f"[{request.request_id}]",
                 extra={
-                    "event": "request_completed",
+                    "event": "request_completed" if not is_error else "request_failed",
                     "request_id": request.request_id,
                     "duration_seconds": round(total_duration, 2),
                     "status_code": r.status_code
