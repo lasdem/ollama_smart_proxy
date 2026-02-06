@@ -83,6 +83,8 @@ class DashboardModel:
 class ProxyDashboard:
     DISPLAY_LIMIT = 10
     QUEUE_LIMIT = 40
+    MODEL_DISPLAY_LIMIT = 40
+    IP_DISPLAY_LIMIT = 15
 
     def __init__(self, proxy_url: str, admin_key: Optional[str] = None, refresh_interval: int = 5):
         self.proxy_url = proxy_url.rstrip('/')
@@ -180,9 +182,9 @@ class ProxyDashboard:
         t = Table(show_header=False, box=None, expand=True)
         t.add_column("Model"); t.add_column("Size", justify="right")
         
-        for m, info in list(models.items())[:4]: # Limit to 4 lines to prevent jitter
+        for m, info in list(models.items())[:5]: # Limit to 5 lines to prevent jitter
             sz = info.get('vram_mb',0) if isinstance(info, dict) else 0
-            t.add_row(m[:40], f"{sz/1024:.1f}GB")
+            t.add_row(m[:self.MODEL_DISPLAY_LIMIT], f"{sz/1024:.1f}GB")
         
         # Container Grid
         container = Table.grid(expand=True)
@@ -214,7 +216,7 @@ class ProxyDashboard:
             except (ValueError, TypeError):
                 dur_str = f"{dur}s"
 
-            t.add_row(icon, r.get('model','?')[:20], r.get('ip','?')[:15], dur_str)
+            t.add_row(icon, r.get('model','?')[:self.MODEL_DISPLAY_LIMIT], r.get('ip','?')[:self.IP_DISPLAY_LIMIT], dur_str)
             
         if not reqs:
             return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})")
@@ -232,7 +234,7 @@ class ProxyDashboard:
         t = Table(title="Errors by Model", box=box.SIMPLE, expand=True)
         t.add_column("Name"); t.add_column("%", justify="right")
         for x in data.get('error_rate_analysis', [])[:self.DISPLAY_LIMIT]:
-             t.add_row(str(x.get('group', '?'))[:40], f"{x.get('error_rate_percent',0):.1f}%")
+             t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
         return t
 
     def _make_model_perf(self, data):
@@ -243,7 +245,7 @@ class ProxyDashboard:
         for x in data.get('perf_by_model', [])[:self.DISPLAY_LIMIT]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
-            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}s", f"{p:.1f}s")
+            t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{w:.1f}s", f"{p:.1f}s")
         return t
 
     def _make_top_ips(self, data):
@@ -257,7 +259,7 @@ class ProxyDashboard:
         t = Table(title="Errors by IP", box=box.SIMPLE, expand=True)
         t.add_column("IP"); t.add_column("%", justify="right")
         for x in data.get('error_rate_by_ip', [])[:self.DISPLAY_LIMIT]:
-            t.add_row(str(x.get('group', '?')), f"{x.get('error_rate_percent',0):.1f}%")
+            t.add_row(str(x.get('group', '?'))[:self.IP_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
         return t
 
     def _make_ip_perf(self, data):
