@@ -20,8 +20,10 @@
 - [x] Analytics Queries (Priority score distribution, Error rate analysis, Model bunching detection)
 - [x] Docker deployment
 - [x] Migration Scripts
+- [x] Admin Dashboard & Analytics API
+- [x] Tool Calling Support Fix
 
-## 🎉 PROJECT READY FOR DEPLOYMENT
+## 🎉 PROJECT READY FOR PRODUCTION
 
 All planned features have been implemented and tested successfully:
 - ✅ All 35 tests passing
@@ -32,12 +34,30 @@ All planned features have been implemented and tested successfully:
 - ✅ Testing endpoints consolidated
 - ✅ Analytics API endpoint with admin authentication
 - ✅ Admin dashboard client for monitoring
+- ✅ Tool/function calling parameter passthrough
 
-See `docs/changelog/v3.5_ANALYTICS_DEPLOYMENT.md` for details.
+See latest changelog: `docs/changelog/v3.7_TOOL_CALLING_FIX.md`
 
 ---
 
 ## 🚀 Completed Implementation
+
+### v3.7 - Tool Calling Support Fix ✅
+
+#### Issue
+- VSCode extensions (like Kilo Code) got "MODEL_NO_TOOLS_USED" errors through proxy
+- Direct Ollama connection worked fine
+- Models with tool capabilities couldn't use them through proxy
+
+#### Solution
+- [x] Implemented parameter passthrough for all request body parameters
+- [x] Excluded only explicitly handled params (model, stream, messages, prompt)
+- [x] Now forwards: tools, tool_choice, temperature, max_tokens, and all other params
+- [x] Maintained safety with `litellm.drop_params = True`
+
+#### Files Changed
+- [x] `src/smart_proxy.py` - Added passthrough logic in process_request()
+- [x] `docs/changelog/v3.7_TOOL_CALLING_FIX.md` - Full documentation
 
 ### v3.6 - Admin Dashboard & Analytics API ✅
 

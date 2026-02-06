@@ -1,7 +1,7 @@
 """
-Smart Proxy for Ollama - Phase 1: VRAM-Aware Priority Queue
-Version: 3.3 - Structured JSON/Human Logging
-Date: 2025-12-19
+Smart Proxy for Ollama
+Version: 3.7
+Date: 2026-02-06
 """
 import asyncio
 import time
@@ -572,6 +572,13 @@ async def process_request(request: QueuedRequest, priority_score: int):
         else:
             # Chat request
             req_kwargs['messages'] = request.body.get('messages', [])
+        
+        # 2b. Passthrough all other parameters (tools, temperature, etc.)
+        # Exclude parameters we've already handled explicitly
+        handled_params = {'model', 'stream', 'messages', 'prompt'}
+        for key, value in request.body.items():
+            if key not in handled_params:
+                req_kwargs[key] = value
 
         # 3. Execute
         response = await acompletion(**req_kwargs)
@@ -716,7 +723,7 @@ async def lifespan(app: FastAPI):
     logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 
 
-app = FastAPI(title="Ollama Smart Proxy", version="3.2", lifespan=lifespan)
+app = FastAPI(title="Ollama Smart Proxy", version="3.7", lifespan=lifespan)
 
 @app.post("/api/chat")
 async def handle_ollama_chat(request: Request):
@@ -744,13 +751,14 @@ async def handle_openai_legacy(request: Request):
 async def root():
     return {
         "service": "Ollama Smart Proxy",
-        "version": "3.5",
+        "version": "3.7",
         "features": [
             "VRAM-aware priority queue",
             "Model affinity scheduling",
             "IP-based fairness",
             "Wait time starvation prevention",
-            "Request ID tracking"
+            "Request ID tracking",
+            "Tool/function calling support"
         ]
     }
 
