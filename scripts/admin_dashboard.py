@@ -162,7 +162,39 @@ class ProxyDashboard:
         return Panel(grid, style="cyan", box=box.ROUNDED)
 
     def _make_health(self, data):
-        if not data or "error" in data: return Panel(f"[red]{data.get('error','No Data')}[/red]", title="Health")
+        if not data or "error" in data:
+            # Parse error to get type
+            error_msg = data.get('error', 'No Data') if data else 'No Data'
+            if 'Connection refused' in error_msg or 'Failed to establish' in error_msg:
+                error_type = "Connection Refused"
+            elif 'timed out' in error_msg.lower() or 'timeout' in error_msg.lower():
+                error_type = "Timeout"
+            elif '403' in error_msg or 'Forbidden' in error_msg:
+                error_type = "Forbidden"
+            elif '500' in error_msg or 'Internal Server Error' in error_msg:
+                error_type = "Server Error"
+            elif '404' in error_msg:
+                error_type = "Not Found"
+            else:
+                error_type = "Connection Failed"
+            
+            # Use same structure as healthy state
+            txt = Text()
+            txt.append("ERROR", style="bold red")
+            
+            # Stats Grid (same structure, different content)
+            stats_grid = Table.grid(expand=True)
+            stats_grid.add_column(style="dim"); stats_grid.add_column(justify="right")
+            stats_grid.add_row("Type:", error_type)
+            stats_grid.add_row("Status:", "Disconnected")
+            stats_grid.add_row("Action:", "Retrying...")
+            
+            # Container Grid (Stacks Text on top of Stats)
+            container = Table.grid(expand=True)
+            container.add_row(txt)
+            container.add_row(stats_grid)
+            
+            return Panel(container, title="🏥 Health", border_style="red")
         
         status = data.get('status', 'unknown')
         color = "green" if status == "healthy" and not data.get('paused') else "red"
