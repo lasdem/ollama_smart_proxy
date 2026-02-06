@@ -51,13 +51,14 @@ class DashboardModel:
         self._last_update_ts = 0
         self._data_hash = ""
 
-    def update(self, health, queue, vram, analytics):
+    def update(self, health, queue, vram, analytics, recent_requests):
         """Update model with new data"""
         new_data = {
             "health": health,
             "queue": queue,
             "vram": vram,
             "analytics": analytics,
+            "recent_requests": recent_requests,
             "timestamp": datetime.now()
         }
         
@@ -83,6 +84,7 @@ class DashboardModel:
 class ProxyDashboard:
     DISPLAY_LIMIT = 10
     QUEUE_LIMIT = 40
+    RECENT_LIMIT = 5
     MODEL_DISPLAY_LIMIT = 40
     IP_DISPLAY_LIMIT = 15
 
@@ -122,8 +124,17 @@ class ProxyDashboard:
                 v_data = self.fetch_json("vram")
                 a_data = self.fetch_json("analytics", params={"hours": hours, "limit": self.DISPLAY_LIMIT})
                 
+                # Fetch recent completed/failed requests using new query_db endpoint
+                r_data = self.fetch_json("query_db", params={
+                    "limit": self.RECENT_LIMIT,
+                    "status": "completed,failed",
+                    "sort_by": "timestamp_completed",
+                    "sort_order": "desc",
+                    "fields": "request_id,model,ip_address,status,processing_time_seconds,timestamp_completed"
+                })
+                
                 # Update model
-                self.model.update(h_data, q_data, v_data, a_data)
+                self.model.update(h_data, q_data, v_data, a_data, r_data)
                 
             except Exception:
                 pass # Squelch network errors in worker
@@ -216,12 +227,53 @@ class ProxyDashboard:
             except (ValueError, TypeError):
                 dur_str = f"{dur}s"
 
-            t.add_row(icon, r.get('model','?')[:20], r.get('ip','?')[:15], dur_str)
+            t.add_row(icon, r.get('model','?')[:self.MODEL_DISPLAY_LIMIT], r.get('ip','?')[:self.IP_DISPLAY_LIMIT], dur_str)
             
         if not reqs:
             return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
             
         return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
+
+    def _make_recent_requests(self, data):
+        """Display last 5 completed/failed requests"""
+        if not data or "error" in data:
+            return Panel("No Data", title="Recent Requests")
+        
+        t = Table(box=None, expand=True, show_header=True, padding=(0,1))
+        t.add_column("St", width=2)
+        t.add_column("Model")
+        t.add_column("IP", style="dim")
+        t.add_column("Time", justify="right")
+        
+        # Get recent requests from query_db endpoint response
+        recent = data.get('requests', [])
+        
+        for r in recent[:self.RECENT_LIMIT]:
+            # Determine icon based on status
+            status = r.get('status', 'unknown')
+            if status == 'completed' or status == 'success':
+                icon = "✓"
+                style = "green"
+            else:
+                icon = "✗"
+                style = "red"
+            
+            model = r.get('model', '?')[:self.MODEL_DISPLAY_LIMIT]
+            ip = r.get('ip_address', '?')[:self.IP_DISPLAY_LIMIT]
+            
+            # Processing time
+            dur = r.get('processing_time_seconds', 0)
+            try:
+                dur_str = f"{float(dur):.1f}s" if dur else "0.0s"
+            except (ValueError, TypeError):
+                dur_str = "0.0s"
+            
+            t.add_row(Text(icon, style=style), model, ip, dur_str)
+        
+        if not recent:
+            return Panel(Text("No Recent Requests", justify="center", style="dim"), title="🕒 Recent (5)", border_style="green")
+        
+        return Panel(t, title=f"🕒 Recent ({len(recent[:self.RECENT_LIMIT])})", border_style="green")
 
     def _make_top_models(self, data):
         t = Table(box=box.SIMPLE, expand=True, show_header=True)
@@ -238,7 +290,7 @@ class ProxyDashboard:
         for x in data.get('perf_by_model', [])[:self.DISPLAY_LIMIT]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
-            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}s", f"{p:.1f}s")
+            t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{w:.1f}s", f"{p:.1f}s")
         return Panel(t, title="⚡ Avg Perf (Model)", border_style="magenta")
 
     def _make_model_errors(self, data):
@@ -291,10 +343,11 @@ class ProxyDashboard:
             Layout(name="right", ratio=1)
         )
         
-        # Left side: Fixed slots for Health, VRAM, Queue
+        # Left side: Fixed slots for Health, VRAM, Recent, Queue
         self.layout["left"].split_column(
             Layout(name="health", size=6),
             Layout(name="vram", ratio=1),
+            Layout(name="recent", size=8),
             Layout(name="queue", ratio=3)
         )
 
@@ -351,6 +404,7 @@ class ProxyDashboard:
                             # Left Column
                             self.layout["health"].update(self._make_health(data['health']))
                             self.layout["vram"].update(self._make_vram(data['vram']))
+                            self.layout["recent"].update(self._make_recent_requests(data['recent_requests']))
                             self.layout["queue"].update(self._make_queue(data['queue']))
                             
                             # Middle Column (Model Analytics)

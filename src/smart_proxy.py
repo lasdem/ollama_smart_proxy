@@ -772,6 +772,156 @@ async def queue_status():
 async def vram_status():
     return vram_monitor.get_stats()
 
+@app.get("/proxy/query_db")
+async def query_db(
+    request: Request,
+    limit: int = 10,
+    offset: int = 0,
+    status: Optional[str] = None,
+    model: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    from_time: Optional[str] = None,
+    to_time: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    fields: Optional[str] = None
+):
+    """
+    Query the requests database with flexible filtering and sorting.
+    Admin endpoint only.
+    
+    Query Parameters:
+    - limit: Number of records to return (1-1000, default: 10)
+    - offset: Offset for pagination (default: 0)
+    - status: Filter by status - comma-separated for multiple (completed, failed, processing, queued)
+    - model: Filter by model name (partial match)
+    - ip_address: Filter by IP address (exact match)
+    - from_time: Filter requests after this timestamp (ISO format)
+    - to_time: Filter requests before this timestamp (ISO format)
+    - sort_by: Sort by field (created_at, timestamp_completed, processing_time_seconds, queue_wait_seconds, priority_score)
+    - sort_order: Sort order (asc, desc, default: desc)
+    - fields: Comma-separated list of fields to return (default: all)
+    """
+    verify_admin_access(request)
+    
+    # Validate parameters
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+    
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+    
+    # Validate sort_by field
+    valid_sort_fields = [
+        "created_at", "timestamp_received", "timestamp_started", "timestamp_completed",
+        "processing_time_seconds", "queue_wait_seconds", "priority_score", "duration_seconds"
+    ]
+    if sort_by not in valid_sort_fields:
+        raise HTTPException(status_code=400, detail=f"Invalid sort_by field. Must be one of: {valid_sort_fields}")
+    
+    # Validate sort_order
+    if sort_order.lower() not in ["asc", "desc"]:
+        raise HTTPException(status_code=400, detail="sort_order must be 'asc' or 'desc'")
+    
+    try:
+        from database import get_db, RequestLog
+        db = get_db()
+        session = db.get_session()
+        
+        # Start building query
+        query = session.query(RequestLog)
+        
+        # Apply filters
+        if status:
+            # Support comma-separated statuses
+            statuses = [s.strip() for s in status.split(",")]
+            query = query.filter(RequestLog.status.in_(statuses))
+        
+        if model:
+            query = query.filter(RequestLog.model_name.like(f"%{model}%"))
+        
+        if ip_address:
+            query = query.filter(RequestLog.source_ip == ip_address)
+        
+        if from_time:
+            try:
+                # Validate and parse ISO format
+                from_dt = datetime.fromisoformat(from_time.replace('Z', '+00:00'))
+                query = query.filter(RequestLog.timestamp_received >= from_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="from_time must be in ISO format")
+        
+        if to_time:
+            try:
+                # Validate and parse ISO format
+                to_dt = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
+                query = query.filter(RequestLog.timestamp_received <= to_dt)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="to_time must be in ISO format")
+        
+        # Get total count before pagination
+        total_count = query.count()
+        
+        # Apply sorting
+        sort_column = getattr(RequestLog, sort_by)
+        if sort_order.lower() == "desc":
+            query = query.order_by(sort_column.desc())
+        else:
+            query = query.order_by(sort_column.asc())
+        
+        # Apply pagination
+        query = query.limit(limit).offset(offset)
+        
+        # Execute query
+        results = query.all()
+        
+        # Convert to list of dicts
+        requests_data = []
+        for record in results:
+            record_dict = {
+                "id": record.id,
+                "request_id": record.request_id,
+                "ip_address": record.source_ip,
+                "model": record.model_name,
+                "prompt_text": record.prompt_text,
+                "response_text": record.response_text,
+                "timestamp_received": record.timestamp_received.isoformat() if record.timestamp_received else None,
+                "timestamp_started": record.timestamp_started.isoformat() if record.timestamp_started else None,
+                "timestamp_completed": record.timestamp_completed.isoformat() if record.timestamp_completed else None,
+                "duration_seconds": record.duration_seconds,
+                "priority_score": record.priority_score,
+                "queue_wait_seconds": record.queue_wait_seconds,
+                "processing_time_seconds": record.processing_time_seconds,
+                "status": record.status,
+                "error_message": record.error_message,
+                "created_at": record.created_at.isoformat() if record.created_at else None
+            }
+            requests_data.append(record_dict)
+        
+        # Filter fields if requested
+        if fields:
+            requested_fields = [f.strip() for f in fields.split(",")]
+            requests_data = [
+                {k: v for k, v in record.items() if k in requested_fields}
+                for record in requests_data
+            ]
+        
+        session.close()
+        
+        return {
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "count": len(requests_data),
+            "requests": requests_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to query database: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to query database: {str(e)}")
+
 @app.get("/proxy/analytics")
 async def proxy_analytics(
     request: Request,
