@@ -125,10 +125,15 @@ class ProxyDashboard:
                 v_data = self.fetch_json("vram")
                 a_data = self.fetch_json("analytics", params={"hours": hours, "limit": self.DISPLAY_LIMIT})
                 
+                # Calculate from_time for the analytics timeframe (use UTC to match server)
+                from datetime import timedelta
+                from_time = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+                
                 # Fetch recent completed/error requests using new query_db endpoint
                 r_data = self.fetch_json("query_db", params={
                     "limit": self.RECENT_LIMIT,
                     "status": "completed,error",
+                    "from_time": from_time,
                     "sort_by": "timestamp_completed",
                     "sort_order": "desc",
                     "fields": "request_id,model,ip_address,status,processing_time_seconds,timestamp_completed"
@@ -263,9 +268,9 @@ class ProxyDashboard:
             t.add_row(icon, r.get('model','?')[:self.MODEL_DISPLAY_LIMIT], r.get('ip','?')[:self.IP_DISPLAY_LIMIT], dur_str)
             
         if not reqs:
-            return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
+            return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})", border_style="bright_yellow")
             
-        return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
+        return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})", border_style="bright_yellow")
 
     def _make_recent_requests(self, data):
         """Display last 5 completed/error requests"""
@@ -306,10 +311,12 @@ class ProxyDashboard:
             
             t.add_row(Text(icon, style=style), model, ip, dur_str)
         
+        total_count = data.get('total_count', 0)
+
         if not recent:
-            return Panel(Text("No Recent Requests", justify="center", style="dim"), title="🕒 Recent (5)", border_style="green")
+            return Panel(Text("No Recent Requests", justify="center", style="dim"), title=f"🕒 Recent (5/{total_count})", border_style="yellow")
         
-        return Panel(t, title=f"🕒 Recent ({len(recent[:self.RECENT_LIMIT])})", border_style="green")
+        return Panel(t, title=f"🕒 Recent ({len(recent[:self.RECENT_LIMIT])}/{total_count})", border_style="yellow")
 
     def _make_top_models(self, data):
         t = Table(box=box.SIMPLE, expand=True, show_header=True)
