@@ -216,62 +216,62 @@ class ProxyDashboard:
             except (ValueError, TypeError):
                 dur_str = f"{dur}s"
 
-            t.add_row(icon, r.get('model','?')[:self.MODEL_DISPLAY_LIMIT], r.get('ip','?')[:self.IP_DISPLAY_LIMIT], dur_str)
+            t.add_row(icon, r.get('model','?')[:20], r.get('ip','?')[:15], dur_str)
             
         if not reqs:
-            return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})")
+            return Panel(Text("Queue Empty", justify="center", style="dim"), title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
             
-        return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})")
+        return Panel(t, title=f"📋 Queue ({data.get('total_depth',0)})", border_style="yellow")
 
     def _make_top_models(self, data):
-        t = Table(title="Top Models", box=box.SIMPLE, expand=True)
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
         t.add_column("Name"); t.add_column("Reqs", justify="right")
         for x in data.get('request_count_by_model', [])[:self.DISPLAY_LIMIT]:
             t.add_row(x['model'], str(x['request_count']))
-        return t
-
-    def _make_model_errors(self, data):
-        t = Table(title="Errors by Model", box=box.SIMPLE, expand=True)
-        t.add_column("Name"); t.add_column("%", justify="right")
-        for x in data.get('error_rate_analysis', [])[:self.DISPLAY_LIMIT]:
-             t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
-        return t
+        return Panel(t, title="📊 Top Models", border_style="bright_magenta")
 
     def _make_model_perf(self, data):
-        t = Table(title="Avg Perf (Model)", box=box.SIMPLE, expand=True)
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
         t.add_column("Name")
         t.add_column("Q Wait", justify="right")
-        t.add_column("Proc", justify="right")
+        t.add_column("Run", justify="right")
         for x in data.get('perf_by_model', [])[:self.DISPLAY_LIMIT]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
-            t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{w:.1f}s", f"{p:.1f}s")
-        return t
+            t.add_row(str(x.get('group', '?'))[:15], f"{w:.1f}s", f"{p:.1f}s")
+        return Panel(t, title="⚡ Avg Perf (Model)", border_style="magenta")
+
+    def _make_model_errors(self, data):
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
+        t.add_column("Name"); t.add_column("%", justify="right")
+        for x in data.get('error_rate_analysis', [])[:self.DISPLAY_LIMIT]:
+             t.add_row(str(x.get('group', '?'))[:self.MODEL_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
+        return Panel(t, title="❌ Errors by Model", border_style="dark_magenta")
 
     def _make_top_ips(self, data):
-        t = Table(title="Top IPs", box=box.SIMPLE, expand=True)
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
         t.add_column("IP"); t.add_column("Reqs", justify="right")
         for x in data.get('request_count_by_ip', [])[:self.DISPLAY_LIMIT]:
             t.add_row(x.get('ip_address','?'), str(x.get('request_count',0)))
-        return t
-
-    def _make_ip_errors(self, data):
-        t = Table(title="Errors by IP", box=box.SIMPLE, expand=True)
-        t.add_column("IP"); t.add_column("%", justify="right")
-        for x in data.get('error_rate_by_ip', [])[:self.DISPLAY_LIMIT]:
-            t.add_row(str(x.get('group', '?'))[:self.IP_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
-        return t
+        return Panel(t, title="📍 Top IPs", border_style="bright_white")
 
     def _make_ip_perf(self, data):
-        t = Table(title="Avg Perf (IP)", box=box.SIMPLE, expand=True)
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
         t.add_column("IP")
         t.add_column("Q Wait", justify="right")
-        t.add_column("Proc", justify="right")
+        t.add_column("Run", justify="right")
         for x in data.get('perf_by_ip', [])[:self.DISPLAY_LIMIT]:
             w = x.get('avg_wait_seconds', 0)
             p = x.get('avg_processing_seconds', 0)
             t.add_row(str(x.get('group', '?')), f"{w:.1f}s", f"{p:.1f}s")
-        return t
+        return Panel(t, title="⚡ Avg Perf (IP)", border_style="white")
+
+    def _make_ip_errors(self, data):
+        t = Table(box=box.SIMPLE, expand=True, show_header=True)
+        t.add_column("IP"); t.add_column("%", justify="right")
+        for x in data.get('error_rate_by_ip', [])[:self.DISPLAY_LIMIT]:
+            t.add_row(str(x.get('group', '?'))[:self.IP_DISPLAY_LIMIT], f"{x.get('error_rate_percent',0):.1f}%")
+        return Panel(t, title="❌ Errors by IP", border_style="dim")
 
     def _init_layout(self):
         """Initialize the static layout tree once"""
@@ -355,13 +355,13 @@ class ProxyDashboard:
                             
                             # Middle Column (Model Analytics)
                             self.layout["m1"].update(self._make_top_models(data['analytics']))
-                            self.layout["m2"].update(self._make_model_errors(data['analytics']))
-                            self.layout["m3"].update(self._make_model_perf(data['analytics']))
+                            self.layout["m2"].update(self._make_model_perf(data['analytics']))
+                            self.layout["m3"].update(self._make_model_errors(data['analytics']))
 
                             # Right Column (IP Analytics)
                             self.layout["r1"].update(self._make_top_ips(data['analytics']))
-                            self.layout["r2"].update(self._make_ip_errors(data['analytics']))
-                            self.layout["r3"].update(self._make_ip_perf(data['analytics']))
+                            self.layout["r2"].update(self._make_ip_perf(data['analytics']))
+                            self.layout["r3"].update(self._make_ip_errors(data['analytics']))
                     
                     time.sleep(0.1)
         except KeyboardInterrupt:
