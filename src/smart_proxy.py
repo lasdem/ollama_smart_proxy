@@ -92,6 +92,7 @@ class QueuedRequest:
     ip: str
     model_name: str
     body: dict
+    raw_body: bytes  # Store raw body bytes for exact forwarding
     raw_request: Request  # Store the raw FastAPI request
     path: str  # Store the endpoint path
     future: asyncio.Future
@@ -301,10 +302,14 @@ def verify_admin_access(request: Request):
 
 async def enqueue_request(request: Request, path: str):
     """Shared logic for all endpoints to handle validation, logging, and queuing"""
+    # Read raw body first to preserve exact formatting
     try:
-        body = await request.json()
-    except Exception as e:
+        raw_body = await request.body()
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading request: {e}")
     
     model_name = body.get('model')
     if not model_name:
@@ -328,6 +333,7 @@ async def enqueue_request(request: Request, path: str):
         ip=client_ip,
         model_name=model_name,
         body=body,
+        raw_body=raw_body,
         raw_request=request,
         path=path,
         future=future
@@ -464,12 +470,12 @@ async def process_request(request: QueuedRequest, priority_score: int):
         client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
 
         try:
-            # Build and send request with the body we already parsed
+            # Build and send request with the raw body bytes (preserves exact formatting)
             req = client.build_request(
                 request.raw_request.method,
                 target_url,
                 headers=headers,
-                json=request.body  # Use the parsed body
+                content=request.raw_body  # Use the raw body bytes
             )
             r = await client.send(req, stream=True)
             
