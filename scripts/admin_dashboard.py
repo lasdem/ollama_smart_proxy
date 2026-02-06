@@ -92,6 +92,7 @@ class ProxyDashboard:
         self.proxy_url = proxy_url.rstrip('/')
         self.admin_key = admin_key
         self.refresh_interval = refresh_interval
+        self.analytics_hours = 24  # Default, will be updated when render_rich is called
         self.console = Console() if RICH_AVAILABLE else None
         self.session = requests.Session()
         
@@ -153,7 +154,7 @@ class ProxyDashboard:
         title = Text("🚀 Ollama Smart Proxy", style="bold cyan")
         
         if timestamp:
-            meta = Text(f"{timestamp.strftime('%H:%M:%S')} | {self.refresh_interval}s refresh", style="dim")
+            meta = Text(f"{self.refresh_interval}s refresh | last {self.analytics_hours}h | {timestamp.strftime('%H:%M:%S')}", style="dim")
         else:
             meta = Text("Connecting...", style="dim yellow")
             
@@ -373,6 +374,7 @@ class ProxyDashboard:
         self.layout["footer"].update(Panel("Ctrl+C to Exit", style="dim"))
 
     def render_rich(self, hours: int):
+        self.analytics_hours = hours  # Store for header display
         self._init_layout()
         self.running = True
         
