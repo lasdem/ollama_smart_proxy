@@ -6,8 +6,6 @@ Date: 2026-02-06
 import asyncio
 import time
 import os
-import hashlib
-import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -15,24 +13,24 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from pydantic import BaseModel
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 
 from vram_monitor import VRAMMonitor
 from log_formatter import setup_logging
+from utils import generate_request_id, verify_admin_access, forward_request_to_ollama
 
 import httpx
 from starlette.background import BackgroundTask
 
 # Database and data access imports
-from database import init_db, close_db
-from data_access import (
-    get_request_log_repo,
-    init_repositories
-)
+from database import init_db, get_db
+from data_access import get_request_log_repo, init_repositories
 
-from enum import Enum
+# Import routers
+import proxy_endpoints
+import ollama_endpoints
+
 import json
 
 # Setup logging
@@ -233,72 +231,18 @@ tracker = RequestTracker(vram_monitor)
 request_queue: List[QueuedRequest] = []
 active_requests: Dict[str, QueuedRequest] = {}
 queue_lock = asyncio.Lock()
-request_counter = 0
 counter_lock = asyncio.Lock()
 stats = {
     "total_requests": 0,
     "completed_requests": 0,
     "failed_requests": 0,
-    "queue_depth_max": 0
+    "queue_depth_max": 0,
+    "max_parallel": OLLAMA_MAX_PARALLEL
 }
 
 # --- TESTING PAUSE/RESUME CONTROL ---
-queue_processing_paused = False
-
-def set_queue_processing_paused(paused: bool):
-    global queue_processing_paused
-    queue_processing_paused = paused
-
-def is_queue_processing_paused():
-    return queue_processing_paused
-
-def generate_request_id(ip: str, model: str) -> str:
-    """Generate unique request ID: REQ{counter:04d}_{ip}_{model}_{hash:4}"""
-    global request_counter
-    
-    # Generate 4-char hash from timestamp + random
-    hash_input = f"{time.time()}{random.random()}".encode()
-    hash_4char = hashlib.md5(hash_input).hexdigest()[:4]
-    
-    req_id = f"REQ{request_counter:04d}_{ip}_{model}_{hash_4char}"
-    request_counter += 1
-    
-    return req_id
-
-def verify_admin_access(request: Request):
-    """
-    Check if the request is authorized via:
-    1. Static Whitelist (.env)
-    2. Dynamic Auth Session (/proxy/auth)
-    3. X-Admin-Key Header (Scripts/Curl)
-    """
-    client_ip = request.client.host
-    now = time.time()
-    
-    # 1. Check Static IPs (Fastest)
-    if client_ip in STATIC_ADMIN_IPS:
-        return
-
-    # 2. Check Dynamic IPs (Session)
-    if client_ip in authorized_ips:
-        expiry = authorized_ips[client_ip]
-        if now < expiry:
-            return # Valid Session
-        else:
-            # Clean up expired session
-            del authorized_ips[client_ip]
-
-    # 3. Check Direct Header (for scripts/curl without session)
-    auth_header = request.headers.get("X-Admin-Key")
-    if auth_header == ADMIN_KEY:
-        return
-
-    # If all fail
-    logger.warning(f"Unauthorized Admin Attempt: {client_ip} on {request.url.path}")
-    raise HTTPException(
-        status_code=403, 
-        detail="Restricted endpoint. Please authenticate via /proxy/auth or use X-Admin-Key header."
-    )
+# Using dict to allow mutation from other modules
+queue_processing_paused = {"value": False}
 
 async def enqueue_request(request: Request, path: str):
     """Shared logic for all endpoints to handle validation, logging, and queuing"""
@@ -389,7 +333,7 @@ async def queue_worker():
     logger.info("Queue worker started", extra={"event": "proxy_startup"})
 
     while True:
-        if is_queue_processing_paused():
+        if queue_processing_paused["value"]:
             await asyncio.sleep(0.05)
             continue
         if tracker.active_request_count >= OLLAMA_MAX_PARALLEL:
@@ -555,40 +499,6 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 del active_requests[request.request_id]
         tracker.remove_request(request.ip, request.model_name)
 
-async def forward_request_to_ollama(request: Request, path: str):
-    base_url = OLLAMA_API_BASE.rstrip("/")
-    # Ensure clean path joining
-    target_url = f"{base_url}/{path.lstrip('/')}"
-    
-    if request.url.query:
-        target_url += f"?{request.url.query}"
-
-    # Filter headers
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
-
-    client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
-
-    try:
-        req = client.build_request(
-            request.method,
-            target_url,
-            headers=headers,
-            content=request.stream()
-        )
-        r = await client.send(req, stream=True)
-        return StreamingResponse(
-            r.aiter_raw(),
-            status_code=r.status_code,
-            headers=dict(r.headers),
-            background=BackgroundTask(r.aclose)
-        )
-    except Exception as e:
-        await client.aclose()
-        logger.error(f"Upstream error for {path}: {str(e)}")
-        raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -627,417 +537,39 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ollama Smart Proxy", version="4.0", lifespan=lifespan)
 
-@app.post("/api/chat")
-async def handle_ollama_chat(request: Request):
-    return await enqueue_request(request, "api/chat")
+# Inject dependencies into proxy endpoints
+proxy_endpoints.inject_dependencies(
+    tracker=tracker,
+    vram_monitor=vram_monitor,
+    queue_lock=queue_lock,
+    request_queue=request_queue,
+    active_requests=active_requests,
+    stats=stats,
+    admin_key=ADMIN_KEY,
+    static_admin_ips=STATIC_ADMIN_IPS,
+    authorized_ips=authorized_ips,
+    queue_processing_paused=queue_processing_paused,
+    ollama_api_base=OLLAMA_API_BASE,
+    request_timeout=REQUEST_TIMEOUT,
+    verify_admin_access_func=lambda req, *args: verify_admin_access(req, ADMIN_KEY, STATIC_ADMIN_IPS, authorized_ips),
+    forward_request_func=lambda req, path: forward_request_to_ollama(req, path, OLLAMA_API_BASE, REQUEST_TIMEOUT),
+    admin_paths=ADMIN_PATHS
+)
 
-@app.post("/api/generate")
-async def handle_ollama_gen(request: Request):
-    return await enqueue_request(request, "api/generate")
+# Set dependencies for Ollama endpoints  
+ollama_endpoints.set_dependencies(
+    enqueue_func=enqueue_request,
+    verify_admin_func=lambda req, *args: verify_admin_access(req, ADMIN_KEY, STATIC_ADMIN_IPS, authorized_ips),
+    forward_func=lambda req, path: forward_request_to_ollama(req, path, OLLAMA_API_BASE, REQUEST_TIMEOUT),
+    admin_key=ADMIN_KEY,
+    static_admin_ips=STATIC_ADMIN_IPS,
+    authorized_ips=authorized_ips,
+    admin_paths=ADMIN_PATHS
+)
 
-@app.post("/v1/chat/completions")
-async def handle_openai_chat(request: Request):
-    return await enqueue_request(request, "v1/chat/completions")
-
-@app.post("/v1/completions")
-async def handle_openai_legacy(request: Request):
-    return await enqueue_request(request, "v1/completions")
-
-
-# Smart Proxy Specific Endpoints
-@app.get("/proxy/")
-async def root():
-    return {
-        "service": "Ollama Smart Proxy",
-        "version": "4.0",
-        "features": [
-            "VRAM-aware priority queue",
-            "Model affinity scheduling",
-            "IP-based fairness",
-            "Wait time starvation prevention",
-            "Request ID tracking",
-            "Pure HTTP proxy - zero manipulation",
-            "Full Ollama API compatibility"
-        ]
-    }
-
-# --- TESTING ENDPOINT: CONTROL QUEUE AND DB SIMULATION ---
-class TestingControlRequest(BaseModel):
-    pause: Optional[bool] = None
-    db_available: Optional[bool] = None
-
-@app.post("/proxy/testing")
-async def proxy_testing_control(req: TestingControlRequest, request: Request):
-    """
-    POST /proxy/testing
-    Control testing parameters for queue processing and database simulation.
-    
-    Examples:
-    {"pause": true}         -> Pauses queue processing
-    {"pause": false}        -> Resumes queue processing
-    {"db_available": false} -> Simulates DB unavailability (uses fallback)
-    {"db_available": true}  -> Restores DB availability (triggers recovery)
-    {"pause": true, "db_available": false} -> Both operations
-    
-    Returns current state of both systems.
-    """
-    verify_admin_access(request)
-    
-    result = {}
-    
-    # Handle queue pause/resume
-    if req.pause is not None:
-        set_queue_processing_paused(req.pause)
-    result["paused"] = is_queue_processing_paused()
-    
-    # Handle DB availability simulation
-    if req.db_available is not None:
-        from database import get_db
-        db = get_db()
-        
-        if req.db_available:
-            # Restore DB and trigger recovery
-            db.set_simulated_unavailable(False)
-            recovered = db.recover_from_fallback_files()
-            result["db_available"] = True
-            result["recovered_records"] = recovered
-        else:
-            # Simulate DB unavailability
-            db.set_simulated_unavailable(True)
-            result["db_available"] = False
-    else:
-        # If not specified, just return current state (always available in production)
-        from database import get_db
-        db = get_db()
-        result["db_available"] = not db._simulated_unavailable
-    
-    return result
-
-
-@app.get("/proxy/health")
-async def health_check():
-    async with queue_lock:
-        queue_depth = len(request_queue)
-    vram_stats = vram_monitor.get_stats()
-    return {
-        "status": "healthy",
-        "paused": is_queue_processing_paused(),
-        "timestamp": datetime.utcnow().isoformat(),
-        "queue_depth": queue_depth,
-        "active_requests": tracker.active_request_count,
-        "max_parallel": OLLAMA_MAX_PARALLEL,
-        "vram": vram_stats,
-        "stats": stats
-    }
-
-
-@app.get("/proxy/queue")
-async def queue_status():
-    async with queue_lock:
-        # 1. format currently processing requests
-        processing_items = [
-            {
-                "status": "processing",
-                "request_id": req.request_id,
-                "model": req.model_name,
-                "ip": req.ip,
-                "total_duration": int(time.time() - req.timestamp), # Total time since reception
-                "priority": tracker.calculate_priority(req)
-            }
-            for req in active_requests.values()
-        ]
-
-        # 2. format waiting requests
-        queued_items = [
-            {
-                "status": "queued",
-                "request_id": req.request_id,
-                "model": req.model_name,
-                "ip": req.ip,
-                "wait_time": int(time.time() - req.timestamp),
-                "priority": tracker.calculate_priority(req)
-            }
-            for req in request_queue
-        ]
-    return {
-        "paused": is_queue_processing_paused(),
-        "total_depth": len(processing_items) + len(queued_items),
-        "processing_count": len(processing_items),
-        "queued_count": len(queued_items),
-        "requests": processing_items + queued_items 
-    }
-
-
-@app.get("/proxy/vram")
-async def vram_status():
-    return vram_monitor.get_stats()
-
-@app.get("/proxy/query_db")
-async def query_db(
-    request: Request,
-    limit: int = 10,
-    offset: int = 0,
-    status: Optional[str] = None,
-    model: Optional[str] = None,
-    ip_address: Optional[str] = None,
-    from_time: Optional[str] = None,
-    to_time: Optional[str] = None,
-    sort_by: str = "created_at",
-    sort_order: str = "desc",
-    fields: Optional[str] = None
-):
-    """
-    Query the requests database with flexible filtering and sorting.
-    Admin endpoint only.
-    
-    Query Parameters:
-    - limit: Number of records to return (1-1000, default: 10)
-    - offset: Offset for pagination (default: 0)
-    - status: Filter by status - comma-separated for multiple (completed, failed, processing, queued)
-    - model: Filter by model name (partial match)
-    - ip_address: Filter by IP address (exact match)
-    - from_time: Filter requests after this timestamp (ISO format)
-    - to_time: Filter requests before this timestamp (ISO format)
-    - sort_by: Sort by field (created_at, timestamp_completed, processing_time_seconds, queue_wait_seconds, priority_score)
-    - sort_order: Sort order (asc, desc, default: desc)
-    - fields: Comma-separated list of fields to return (default: all)
-    """
-    verify_admin_access(request)
-    
-    # Validate parameters
-    if limit < 1 or limit > 1000:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
-    
-    if offset < 0:
-        raise HTTPException(status_code=400, detail="offset must be >= 0")
-    
-    # Validate sort_by field
-    valid_sort_fields = [
-        "created_at", "timestamp_received", "timestamp_started", "timestamp_completed",
-        "processing_time_seconds", "queue_wait_seconds", "priority_score", "duration_seconds"
-    ]
-    if sort_by not in valid_sort_fields:
-        raise HTTPException(status_code=400, detail=f"Invalid sort_by field. Must be one of: {valid_sort_fields}")
-    
-    # Validate sort_order
-    if sort_order.lower() not in ["asc", "desc"]:
-        raise HTTPException(status_code=400, detail="sort_order must be 'asc' or 'desc'")
-    
-    try:
-        from database import get_db, RequestLog
-        db = get_db()
-        session = db.get_session()
-        
-        # Start building query
-        query = session.query(RequestLog)
-        
-        # Apply filters
-        if status:
-            # Support comma-separated statuses
-            statuses = [s.strip() for s in status.split(",")]
-            query = query.filter(RequestLog.status.in_(statuses))
-        
-        if model:
-            query = query.filter(RequestLog.model_name.like(f"%{model}%"))
-        
-        if ip_address:
-            query = query.filter(RequestLog.source_ip == ip_address)
-        
-        if from_time:
-            try:
-                # Validate and parse ISO format
-                from_dt = datetime.fromisoformat(from_time.replace('Z', '+00:00'))
-                query = query.filter(RequestLog.timestamp_received >= from_dt)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="from_time must be in ISO format")
-        
-        if to_time:
-            try:
-                # Validate and parse ISO format
-                to_dt = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
-                query = query.filter(RequestLog.timestamp_received <= to_dt)
-            except ValueError:
-                raise HTTPException(status_code=400, detail="to_time must be in ISO format")
-        
-        # Get total count before pagination
-        total_count = query.count()
-        
-        # Apply sorting
-        sort_column = getattr(RequestLog, sort_by)
-        if sort_order.lower() == "desc":
-            query = query.order_by(sort_column.desc())
-        else:
-            query = query.order_by(sort_column.asc())
-        
-        # Apply pagination
-        query = query.limit(limit).offset(offset)
-        
-        # Execute query
-        results = query.all()
-        
-        # Convert to list of dicts
-        requests_data = []
-        for record in results:
-            record_dict = {
-                "id": record.id,
-                "request_id": record.request_id,
-                "ip_address": record.source_ip,
-                "model": record.model_name,
-                "prompt_text": record.prompt_text,
-                "response_text": record.response_text,
-                "timestamp_received": record.timestamp_received.isoformat() if record.timestamp_received else None,
-                "timestamp_started": record.timestamp_started.isoformat() if record.timestamp_started else None,
-                "timestamp_completed": record.timestamp_completed.isoformat() if record.timestamp_completed else None,
-                "duration_seconds": record.duration_seconds,
-                "priority_score": record.priority_score,
-                "queue_wait_seconds": record.queue_wait_seconds,
-                "processing_time_seconds": record.processing_time_seconds,
-                "status": record.status,
-                "error_message": record.error_message,
-                "created_at": record.created_at.isoformat() if record.created_at else None
-            }
-            requests_data.append(record_dict)
-        
-        # Filter fields if requested
-        if fields:
-            requested_fields = [f.strip() for f in fields.split(",")]
-            requests_data = [
-                {k: v for k, v in record.items() if k in requested_fields}
-                for record in requests_data
-            ]
-        
-        session.close()
-        
-        return {
-            "total_count": total_count,
-            "limit": limit,
-            "offset": offset,
-            "count": len(requests_data),
-            "requests": requests_data
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to query database: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to query database: {str(e)}")
-
-@app.get("/proxy/analytics")
-async def proxy_analytics(
-    request: Request,
-    hours: int = 24,
-    group_by: str = "model_name",
-    limit: int = 10
-):
-    """
-    GET /proxy/analytics
-    Get analytics data for the specified time period.
-    Requires admin authentication.
-    
-    Query Parameters:
-    - hours: Number of hours to look back (default: 24)
-    - group_by: Grouping method for distributions ('model_name' or 'hour', default: 'model_name')
-    - limit: Limit for top IP results (default: 10)
-    
-    Returns comprehensive analytics including:
-    - Request counts by model and IP
-    - Average duration by model
-    - Priority score distribution
-    - Error rate analysis
-    - Model bunching detection
-    - Requests over time
-    """
-    verify_admin_access(request)
-    
-    from data_access import get_analytics_repo
-    from datetime import timedelta
-    
-    analytics_repo = get_analytics_repo()
-    
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=hours)
-    
-    try:
-        analytics_data = {
-            "time_range": {
-                "start": start_time.isoformat(),
-                "end": end_time.isoformat(),
-                "hours": hours
-            },
-            "request_count_by_model": analytics_repo.get_request_count_by_model(start_time, end_time),
-            "request_count_by_ip": analytics_repo.get_request_count_by_ip(start_time, end_time, limit),
-            "average_duration_by_model": analytics_repo.get_average_duration_by_model(start_time, end_time),
-            "priority_score_distribution": analytics_repo.get_priority_score_distribution(start_time, end_time, group_by),
-            "error_rate_analysis": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by),
-            "error_rate_by_ip": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by='ip'),
-            "perf_by_model": analytics_repo.get_performance_stats(start_time, end_time, group_by='model_name'),
-            "perf_by_ip": analytics_repo.get_performance_stats(start_time, end_time, group_by='ip'),
-            "model_bunching_detection": analytics_repo.get_model_bunching_detection(start_time, end_time, time_window_seconds=60),
-            "requests_over_time": analytics_repo.get_requests_over_time(interval='hour')
-        }
-        
-        return analytics_data
-    except Exception as e:
-        logger.error(f"Failed to retrieve analytics: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
-
-class AuthPayload(BaseModel):
-    key: str
-
-@app.post("/proxy/auth")
-async def proxy_login(payload: AuthPayload, request: Request):
-    """
-    Authenticate an IP address for 24 hours using the Admin Key.
-    """
-    if payload.key != ADMIN_KEY:
-        # Rate limiting logic could go here to prevent brute force
-        logger.warning(f"Invalid Admin Key Attempt from {request.client.host}")
-        raise HTTPException(status_code=403, detail="Invalid Admin Key")
-
-    client_ip = request.client.host
-    expiration = time.time() + (24 * 60 * 60) # 24 Hours from now
-    
-    # Add/Update the IP in the allowed list
-    authorized_ips[client_ip] = expiration
-    
-    logger.info(f"Admin Access Granted: {client_ip} until {datetime.fromtimestamp(expiration)}")
-    
-    return {
-        "status": "authenticated",
-        "ip": client_ip,
-        "expires_at": datetime.fromtimestamp(expiration).isoformat()
-    }
-
-
-# --- 1. Explicit Protected Admin Routes ---
-@app.api_route("/api/pull", methods=["POST"])
-@app.api_route("/api/push", methods=["POST"])
-@app.api_route("/api/create", methods=["POST"])
-@app.api_route("/api/copy", methods=["POST"])
-@app.api_route("/api/delete", methods=["DELETE"])
-@app.api_route("/api/blobs/{digest}", methods=["POST", "HEAD"]) 
-async def protected_admin_routes(request: Request):
-    # This will raise 403 if not authorized
-    verify_admin_access(request)
-
-    # Log access
-    logger.info(
-        f"Admin Access: {request.client.host} to {request.url.path}",
-        extra={"event": "admin_access", "ip": request.client.host, "path": request.url.path}
-    )
-
-    # Forward if valid
-    return await forward_request_to_ollama(request, request.url.path)
-
-# --- 2. Catch-All for Read-Only (Safe) Routes ---
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"])
-async def proxy_catch_all(request: Request, path: str):
-    # Double check no admin paths slipped into the wildcard
-    # (Optional safety net)
-    if any(path.startswith(p) for p in ADMIN_PATHS):
-        verify_admin_access(request)
-
-    return await forward_request_to_ollama(request, path)
+# Register routers
+app.include_router(proxy_endpoints.router)
+app.include_router(ollama_endpoints.router)
 
 if __name__ == "__main__":
     import uvicorn
