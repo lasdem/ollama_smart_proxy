@@ -1,16 +1,29 @@
 # TODO.md - Implementation Roadmap
 
-## 4.1 - Monitoring and Logging improvements
-The administrator wants to be able to see the requests and responses from ollama in a WebUI in realtime for debugging purposes. 
+## 4.1 - Monitoring and Logging improvements (Implemented)
 
-Requirements: 
-- The frontend should be able to display the requests and responses from ollama in realtime.
-- The frontend should dislay the conversation like ChatGPT like interface.
-- The frontend should be able to display the raw requests and responses from ollama in a JSON format.
-- The frontend should be able to display the request and response metadata in a table format.
+The administrator can see requests and responses from Ollama in a Web UI in real time for debugging.
 
+**Requirements (done):**
 
-TODO: 
-- [ ] Add a react frontend to the project that displays the requests and responses from ollama in realtime.
-- [ ] Add a new endpoints to the API to facilitate the frontend.
+- [x] Frontend displays requests and responses in real time (Live view + WebSocket `/proxy/live`).
+- [x] Frontend displays conversation in a ChatGPT-like interface (Conversations view, grouped by session).
+- [x] Frontend can show raw request/response in JSON (detail modal Raw JSON tab).
+- [x] Frontend shows request/response metadata in table form (History + detail).
+- [x] Dashboard protected by same admin authentication as the API (key via header or query, static/session IPs).
 
+**Refinements (done):** Content-based session grouping (message-history fingerprint); Live merged into Conversations tab with Go live / Stop live and optional auto-refresh; prompt from last user message; empty-prompt (warmup) sessions filtered out; live streaming into open thread without duplicate rows; User/Assistant labels show IP and duration.
+
+**Implementation:**
+
+- Stream tap in `process_request`: parse NDJSON, accumulate `response_text`, persist on completion; optional broadcast to live channel.
+- Live broadcaster + WebSocket `/proxy/live`: join in-progress streams, receive chunks and completion.
+- `session_id` and `outgoing_conversation_fingerprint` on RequestLog (content-based session grouping); filter/group by session in query_db and Conversations view.
+- REST: `GET /proxy/query_db` (filters incl. session_id), `GET /proxy/requests/{request_id}` for detail.
+- Dashboard: `GET /proxy/dashboard` (and `/proxy/dashboard/*` assets), served with admin auth.
+
+---
+
+## Future
+
+- [ ] Optional: store full request body for raw JSON view (currently prompt_text + response_text).

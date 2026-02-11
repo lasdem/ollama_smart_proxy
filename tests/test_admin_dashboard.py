@@ -159,6 +159,54 @@ class TestAnalyticsEndpoint:
         assert ip_count <= 5, f"Should limit to 5 IPs, got {ip_count}"
 
 
+class TestMonitoringEndpoints:
+    """Test monitoring Web UI and request detail endpoints (4.1)"""
+
+    def test_dashboard_served_with_auth(self):
+        """Dashboard is served when authenticated (localhost or key)"""
+        resp = requests.get(f"{TestConfig.PROXY_URL}/proxy/dashboard", timeout=TestConfig.TIMEOUT)
+        assert resp.status_code == 200, "Dashboard should be reachable with localhost"
+        assert "text/html" in resp.headers.get("Content-Type", "")
+        assert b"Proxy Monitor" in resp.content or b"proxy" in resp.content.lower()
+
+    def test_dashboard_asset_served_with_auth(self):
+        """Dashboard static assets are served when authenticated"""
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/dashboard/app.js",
+            headers={"X-Admin-Key": TestConfig.ADMIN_KEY},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200
+        assert "javascript" in resp.headers.get("Content-Type", "").lower() or len(resp.content) > 0
+
+    def test_request_detail_404_for_unknown_id(self):
+        """Request detail returns 404 for unknown request_id"""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/requests/nonexistent-request-id-12345",
+            headers=headers,
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 404
+        data = resp.json()
+        assert "not found" in data.get("detail", "").lower()
+
+    def test_query_db_includes_session_id_filter(self):
+        """query_db accepts session_id filter and returns session_id in rows"""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/query_db",
+            headers=headers,
+            params={"limit": 2},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "requests" in data
+        for req in data["requests"]:
+            assert "session_id" in req
+
+
 class TestAdminAuthentication:
     """Test admin authentication mechanisms"""
     

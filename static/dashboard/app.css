@@ -1,0 +1,87 @@
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; margin: 0; background: #1a1a1a; color: #e0e0e0; }
+.header { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; background: #252525; border-bottom: 1px solid #333; }
+.header h1 { margin: 0; font-size: 1.25rem; }
+.auth { display: flex; align-items: center; gap: 0.5rem; }
+.auth input { padding: 0.35rem 0.5rem; width: 12rem; background: #333; border: 1px solid #444; color: #eee; border-radius: 4px; }
+.auth button { padding: 0.35rem 0.75rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; }
+#authStatus { font-size: 0.85rem; color: #888; }
+.tabs { display: flex; gap: 0; padding: 0 1rem; background: #252525; border-bottom: 1px solid #333; }
+.tabs button { padding: 0.6rem 1rem; background: transparent; border: none; color: #aaa; cursor: pointer; border-bottom: 2px solid transparent; }
+.tabs button:hover { color: #fff; }
+.tabs button.active { color: #0af; border-bottom-color: #0af; }
+.tab-panel { padding: 1rem; display: block; }
+.tab-panel.hidden { display: none; }
+.hidden { display: none !important; }
+
+/* Conversation controls */
+.conv-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+.conv-controls button { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; }
+.conv-live-controls { display: flex; align-items: center; gap: 0.5rem; }
+.conv-live-controls #disconnectWs { background: #c44; color: #fff; }
+#wsStatus { font-size: 0.85rem; min-width: 3rem; }
+.poll-label { font-size: 0.85rem; color: #aaa; cursor: pointer; display: flex; align-items: center; gap: 0.35rem; }
+.live-badge { display: inline-block; background: #0f0; color: #000; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; vertical-align: middle; }
+.back-btn { background: transparent; border: 1px solid #444; color: #aaa; padding: 0.35rem 0.75rem; border-radius: 4px; cursor: pointer; margin-bottom: 0.5rem; }
+.back-btn:hover { color: #fff; border-color: #888; }
+
+/* Session list */
+.session-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.session-item { padding: 0.75rem; background: #252525; border: 1px solid #333; border-radius: 6px; cursor: pointer; }
+.session-item:hover { border-color: #0af; }
+.session-item.session-live { border-color: #0a7; }
+.session-header { font-size: 0.9rem; }
+.session-preview { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
+
+/* Thread */
+.session-thread { margin-top: 0.5rem; }
+.session-thread h3 { margin: 0 0 0.75rem; font-size: 1rem; }
+.thread-msg { margin-bottom: 1rem; padding: 0.75rem; background: #252525; border-radius: 6px; border-left: 3px solid #0a7; }
+.thread-msg.user { border-left-color: #f80; }
+.thread-msg.thread-msg-live { border-left-color: #0f0; }
+.streaming-indicator { color: #0f0; font-weight: 600; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.thread-msg .role { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem; }
+.thread-msg .body { white-space: pre-wrap; font-size: 0.9rem; }
+.thread-msg .body.markdown-body { white-space: normal; }
+.thread-msg .markdown-body ul, .thread-msg .markdown-body ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.thread-msg .markdown-body pre, .thread-msg .markdown-body code { background: #1a1a1a; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.85em; }
+.thread-msg .markdown-body pre { padding: 0.75rem; overflow-x: auto; }
+.thread-msg .markdown-body pre code { padding: 0; }
+.thread-msg .markdown-body strong { font-weight: 600; }
+.thread-msg .markdown-body p { margin: 0.5rem 0; }
+.thread-msg .markdown-body hr { border: none; border-top: 1px solid #444; margin: 0.75rem 0; }
+
+/* Metadata toggle in thread */
+.meta-toggle { background: transparent; border: 1px solid #555; color: #888; padding: 0 0.4rem; border-radius: 3px; cursor: pointer; font-size: 0.8rem; line-height: 1.2; }
+.meta-toggle:hover { color: #fff; border-color: #888; }
+.thread-meta { margin-top: 0.5rem; padding: 0.5rem; background: #1e1e1e; border-radius: 4px; }
+.inline-meta-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.inline-meta-table td { padding: 0.15rem 0.4rem; border-bottom: 1px solid #333; }
+.inline-meta-table .meta-key { color: #0af; width: 9rem; }
+
+/* History filters & table */
+.filters { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
+.filters input { padding: 0.35rem 0.5rem; background: #333; border: 1px solid #444; color: #eee; border-radius: 4px; }
+.filters button { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #333; }
+th { background: #252525; color: #888; font-weight: 600; font-size: 0.85rem; }
+tr:hover { background: #252525; }
+td a { color: #0af; text-decoration: none; }
+td a:hover { text-decoration: underline; }
+
+/* Detail modal */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal.hidden { display: none; }
+.modal-content { background: #252525; border: 1px solid #444; border-radius: 8px; padding: 1.5rem; max-width: 90vw; max-height: 85vh; overflow: auto; position: relative; min-width: 40vw; }
+.modal-close { position: absolute; top: 0.5rem; right: 0.5rem; background: transparent; border: none; color: #888; font-size: 1.5rem; cursor: pointer; }
+.detail-meta { font-size: 0.85rem; color: #888; margin-bottom: 1rem; }
+.detail-meta-table { width: 100%; border-collapse: collapse; margin-bottom: 0.5rem; }
+.detail-meta-table td { padding: 0.25rem 0.5rem; border-bottom: 1px solid #333; vertical-align: top; }
+.detail-meta-table .meta-key { color: #0af; width: 10rem; }
+.detail-tabs { margin-bottom: 0.5rem; }
+.detail-tabs button { padding: 0.35rem 0.75rem; margin-right: 0.5rem; background: #333; border: none; color: #ccc; border-radius: 4px; cursor: pointer; }
+.detail-tabs button.active { background: #0af; color: #000; }
+.detail-body { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; margin: 0; max-height: 60vh; overflow: auto; background: #1a1a1a; padding: 1rem; border-radius: 4px; }

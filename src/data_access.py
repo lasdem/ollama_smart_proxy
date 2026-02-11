@@ -134,7 +134,7 @@ class RequestLogRepository:
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None) -> Optional[RequestLog]:
         """
         Log or update a request
         
@@ -150,7 +150,9 @@ class RequestLogRepository:
             timestamp_started: Optional timestamp when processing started
             queue_wait_seconds: Optional queue wait time in seconds
             processing_time_seconds: Optional processing time in seconds
-            
+            session_id: Optional session id for conversation grouping
+            outgoing_conversation_fingerprint: Optional hash of messages+response for matching next request's prefix
+
         Returns:
             RequestLog: Request log object or None if not found
         """
@@ -176,7 +178,11 @@ class RequestLogRepository:
                     request_log.queue_wait_seconds = queue_wait_seconds
                 if processing_time_seconds is not None:
                     request_log.processing_time_seconds = processing_time_seconds
-                
+                if session_id is not None:
+                    request_log.session_id = session_id
+                if outgoing_conversation_fingerprint is not None:
+                    request_log.outgoing_conversation_fingerprint = outgoing_conversation_fingerprint
+
                 if status == "completed":
                     request_log.timestamp_completed = datetime.utcnow()
                 elif status == "error":
@@ -196,6 +202,8 @@ class RequestLogRepository:
                     timestamp_started=timestamp_started,
                     queue_wait_seconds=queue_wait_seconds,
                     processing_time_seconds=processing_time_seconds,
+                    session_id=session_id,
+                    outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
                     timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None
                 )
                 session.add(request_log)
@@ -215,6 +223,8 @@ class RequestLogRepository:
                 'model_name': model_name,
                 'prompt_text': prompt_text,
                 'response_text': response_text,
+                'session_id': session_id,
+                'outgoing_conversation_fingerprint': outgoing_conversation_fingerprint,
                 'timestamp_received': datetime.utcnow().isoformat() if not timestamp_started else timestamp_started.isoformat(),
                 'timestamp_started': timestamp_started.isoformat() if timestamp_started else None,
                 'timestamp_completed': datetime.utcnow().isoformat() if status in ["completed", "error"] else None,
@@ -245,8 +255,28 @@ class RequestLogRepository:
                 processing_time_seconds=processing_time_seconds,
                 status=status,
                 error_message="Request completed with status: error" if status == "error" else None,
+                session_id=session_id,
+                outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
                 created_at=datetime.utcnow()
             )
+        finally:
+            session.close()
+
+    def get_request_by_ip_and_outgoing_fingerprint(self, source_ip: str, fingerprint: str) -> Optional[RequestLog]:
+        """Return the most recent request from this IP with this outgoing_conversation_fingerprint (for session chaining)."""
+        try:
+            session = self.db.get_session()
+            request_log = (
+                session.query(RequestLog)
+                .filter_by(source_ip=source_ip, outgoing_conversation_fingerprint=fingerprint)
+                .order_by(RequestLog.timestamp_received.desc())
+                .limit(1)
+                .first()
+            )
+            return request_log
+        except Exception as e:
+            logger.error(f"Failed to get request by IP and fingerprint: {e}")
+            raise
         finally:
             session.close()
 

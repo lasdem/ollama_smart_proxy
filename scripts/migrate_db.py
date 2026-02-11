@@ -99,12 +99,68 @@ def migrate_to_v1():
     Migration v1: Initial schema with request_logs table
     """
     logger.info("Running migration v1: Initial schema")
-    
+
     # The init_db() call already creates the tables
     # This migration just records that v1 is complete
-    
+
     record_migration(1, "Initial schema with request_logs table")
     logger.info("Migration v1 complete")
+
+
+def migrate_to_v2():
+    """
+    Migration v2: Add session_id column for conversation grouping (IP + time bucket)
+    """
+    logger.info("Running migration v2: Add session_id column")
+    db = get_db()
+    session = db.get_session()
+    try:
+        inspector = inspect(db.engine)
+        columns = [c["name"] for c in inspector.get_columns("request_logs")]
+        if "session_id" not in columns:
+            session.execute(text(
+                "ALTER TABLE request_logs ADD COLUMN session_id VARCHAR(255)"
+            ))
+            session.commit()
+            logger.info("Added session_id column to request_logs")
+        else:
+            logger.info("session_id column already exists")
+        record_migration(2, "Add session_id column for conversation grouping")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Migration v2 failed: {e}")
+        raise
+    finally:
+        session.close()
+    logger.info("Migration v2 complete")
+
+
+def migrate_to_v3():
+    """
+    Migration v3: Add outgoing_conversation_fingerprint for content-based session grouping
+    """
+    logger.info("Running migration v3: Add outgoing_conversation_fingerprint column")
+    db = get_db()
+    session = db.get_session()
+    try:
+        inspector = inspect(db.engine)
+        columns = [c["name"] for c in inspector.get_columns("request_logs")]
+        if "outgoing_conversation_fingerprint" not in columns:
+            session.execute(text(
+                "ALTER TABLE request_logs ADD COLUMN outgoing_conversation_fingerprint VARCHAR(64)"
+            ))
+            session.commit()
+            logger.info("Added outgoing_conversation_fingerprint column to request_logs")
+        else:
+            logger.info("outgoing_conversation_fingerprint column already exists")
+        record_migration(3, "Add outgoing_conversation_fingerprint for content-based session grouping")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Migration v3 failed: {e}")
+        raise
+    finally:
+        session.close()
+    logger.info("Migration v3 complete")
 
 
 def backfill_from_fallback_logs():
@@ -152,9 +208,8 @@ def run_migrations(target_version: int = None):
     # Define available migrations
     migrations = {
         1: migrate_to_v1,
-        # Add future migrations here:
-        # 2: migrate_to_v2,
-        # 3: migrate_to_v3,
+        2: migrate_to_v2,
+        3: migrate_to_v3,
     }
     
     # Determine which migrations to run

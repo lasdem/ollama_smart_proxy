@@ -1,0 +1,118 @@
+"""
+Stream tap for Ollama responses: forwards raw bytes to client while parsing NDJSON
+to accumulate response text for logging and optional broadcast.
+"""
+import asyncio
+import json
+import logging
+from typing import AsyncIterator, Callable, Optional, Union, Awaitable
+
+logger = logging.getLogger(__name__)
+
+
+def extract_text_from_ndjson(line: bytes, path: str) -> Optional[str]:
+    """
+    Extract displayable text from one NDJSON line based on endpoint path.
+    Returns None if no text in this chunk or parse fails.
+    """
+    try:
+        data = json.loads(line.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    path_lower = path.strip("/").lower()
+    # /api/chat: message.content
+    if "api/chat" in path_lower:
+        msg = data.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                return content
+        return None
+    # /api/generate: response
+    if "api/generate" in path_lower:
+        content = data.get("response")
+        if isinstance(content, str) and content:
+            return content
+        return None
+    # /v1/chat/completions: choices[0].delta.content
+    if "v1/chat/completions" in path_lower:
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            delta = choices[0].get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    return content
+        return None
+    # /v1/completions: choices[0].text
+    if "v1/completions" in path_lower:
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            text = choices[0].get("text")
+            if isinstance(text, str) and text:
+                return text
+        return None
+    return None
+
+
+async def tee_stream(
+    raw_iter: AsyncIterator[bytes],
+    path: str,
+    request_id: str,
+    on_chunk: Optional[Callable[[str, str], Union[None, Awaitable[None]]]] = None,
+    on_done: Optional[Callable[[str, str], Union[None, Awaitable[None]]]] = None,
+) -> AsyncIterator[bytes]:
+    """
+    Tee the raw response stream: yield each chunk unchanged to the client,
+    and parse NDJSON lines to accumulate response text. Call on_chunk for each
+    text delta and on_done with full accumulated text at end.
+    on_done can be async; it will be scheduled with create_task so the iterator
+    can finish without awaiting it.
+    """
+    buffer = b""
+    accumulated: list[str] = []
+
+    try:
+        async for chunk in raw_iter:
+            yield chunk
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                # SSE prefix for OpenAI-style
+                if line.startswith(b"data: "):
+                    line = line[6:]
+                if line.strip() == b"[DONE]":
+                    continue
+                text = extract_text_from_ndjson(line, path)
+                if text:
+                    accumulated.append(text)
+                    if on_chunk:
+                        try:
+                            result = on_chunk(request_id, text)
+                            if asyncio.iscoroutine(result):
+                                asyncio.create_task(result)
+                        except Exception as e:
+                            logger.warning("stream_tap on_chunk failed: %s", e)
+        if buffer.strip():
+            text = extract_text_from_ndjson(buffer, path)
+            if text:
+                accumulated.append(text)
+                if on_chunk:
+                    try:
+                        result = on_chunk(request_id, text)
+                        if asyncio.iscoroutine(result):
+                            asyncio.create_task(result)
+                    except Exception as e:
+                        logger.warning("stream_tap on_chunk failed: %s", e)
+    finally:
+        full_text = "".join(accumulated)
+        if on_done:
+            try:
+                result = on_done(request_id, full_text)
+                if asyncio.iscoroutine(result):
+                    asyncio.get_running_loop().create_task(result)
+            except Exception as e:
+                logger.warning("stream_tap on_done failed: %s", e)

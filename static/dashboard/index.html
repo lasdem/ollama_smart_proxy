@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="/proxy/dashboard/">
+  <title>Proxy Monitor — Ollama Smart Proxy</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <h1>Proxy Monitor</h1>
+    <div class="auth">
+      <input type="password" id="adminKey" placeholder="Admin key" />
+      <button id="setKey">Set key</button>
+      <span id="authStatus"></span>
+    </div>
+  </header>
+  <nav class="tabs">
+    <button data-tab="conversations">Conversations</button>
+    <button data-tab="history">History</button>
+  </nav>
+  <main>
+    <section id="conversations" class="tab-panel">
+      <div class="conv-controls">
+        <button id="loadSessions">Refresh</button>
+        <span class="conv-live-controls">
+          <button id="connectWs">Go live</button>
+          <button id="disconnectWs" class="hidden">Stop live</button>
+          <span id="wsStatus"></span>
+        </span>
+        <label class="poll-label"><input type="checkbox" id="autoPoll" /> Auto-refresh (10s)</label>
+      </div>
+      <div id="sessionList" class="session-list"></div>
+      <div id="sessionThread" class="session-thread hidden">
+        <button id="backToSessions" class="back-btn">&larr; Back to sessions</button>
+        <h3 id="sessionTitle">Conversation</h3>
+        <div id="threadMessages"></div>
+      </div>
+    </section>
+    <section id="history" class="tab-panel hidden">
+      <div class="filters">
+        <label>Limit <input type="number" id="limit" value="20" min="1" max="200" /></label>
+        <label>Status <input type="text" id="filterStatus" placeholder="e.g. completed" /></label>
+        <label>Model <input type="text" id="filterModel" placeholder="partial match" /></label>
+        <button id="loadHistory">Load</button>
+      </div>
+      <div class="table-wrap">
+        <table id="historyTable">
+          <thead>
+            <tr>
+              <th>Request ID</th>
+              <th>Time</th>
+              <th>Model</th>
+              <th>IP</th>
+              <th>Status</th>
+              <th>Duration</th>
+              <th>Queue wait</th>
+              <th>Processing</th>
+              <th>Session</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <div id="detailModal" class="modal hidden">
+    <div class="modal-content">
+      <button class="modal-close" id="closeDetail">&times;</button>
+      <div class="detail-meta"></div>
+      <div class="detail-tabs">
+        <button data-detail="text" class="active">Request / Response</button>
+        <button data-detail="raw">Raw JSON</button>
+      </div>
+      <pre id="detailText" class="detail-body"></pre>
+      <pre id="detailRaw" class="detail-body hidden"></pre>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

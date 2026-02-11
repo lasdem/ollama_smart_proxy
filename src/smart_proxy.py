@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from vram_monitor import VRAMMonitor
 from log_formatter import setup_logging
 from utils import generate_request_id, verify_admin_access, forward_request_to_ollama
+from stream_tap import tee_stream
+from live_broadcaster import get_broadcaster
 
 import httpx
 from starlette.background import BackgroundTask
@@ -32,6 +34,7 @@ import proxy_endpoints
 import ollama_endpoints
 
 import json
+import hashlib
 
 # Setup logging
 LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()
@@ -58,7 +61,6 @@ PRIORITY_BASE_LARGE_SWAP_THRESHOLD_GB = int(os.getenv("PRIORITY_BASE_LARGE_SWAP_
 PRIORITY_WAIT_TIME_MULTIPLIER = int(os.getenv("PRIORITY_WAIT_TIME_MULTIPLIER", "-1"))  # -1 per sec (higher priority)
 PRIORITY_RATE_LIMIT_MULTIPLIER = int(os.getenv("PRIORITY_RATE_LIMIT_MULTIPLIER", "5")) # +5 per queued + recent (combined max 100)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "600"))  # 10 minutes default
-
 # --- SECURITY GLOBALS ---
 ADMIN_KEY = os.getenv("PROXY_ADMIN_KEY", None)
 if not ADMIN_KEY:
@@ -94,6 +96,7 @@ class QueuedRequest:
     raw_request: Request  # Store the raw FastAPI request
     path: str  # Store the endpoint path
     future: asyncio.Future
+    session_id: Optional[str] = None  # Set in enqueue_request for live UI
     
     def __repr__(self):
         wait_time = int(time.time() - self.timestamp)
@@ -283,21 +286,38 @@ async def enqueue_request(request: Request, path: str):
         future=future
     )
     
-    # Extract prompt for logging based on type
+    # Extract prompt for logging: use the LAST user message (the new query in multi-turn conversations)
     prompt_text = "N/A"
     if "messages" in body:
         msgs = body['messages']
         if msgs and isinstance(msgs, list):
-            prompt_text = str(msgs[0].get('content', '')) if isinstance(msgs[0], dict) else str(msgs[0])
+            last_msg = msgs[-1]
+            prompt_text = str(last_msg.get('content', '')) if isinstance(last_msg, dict) else str(last_msg)
     elif "prompt" in body:
         prompt_text = str(body['prompt'])
 
     priority_score = tracker.calculate_priority(queued_req)
-    
+    # Content-based session: same session when request's message prefix matches a previous request's messages+response
+    session_id = f"{client_ip}_{int(queued_req.timestamp)}"
+    try:
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        if len(messages) > 1:
+            # Normalize to list of {role, content} for stable fingerprint
+            prefix = [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages[:-1] if isinstance(m, dict)]
+            if prefix:
+                incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
+                existing = request_repo.get_request_by_ip_and_outgoing_fingerprint(client_ip, incoming_fp)
+                if existing and existing.session_id:
+                    session_id = existing.session_id
+    except Exception as e:
+        logger.debug("Session reuse check failed: %s", e)
+
+    queued_req.session_id = session_id
+
     # Log to DB
     await asyncio.to_thread(
         request_repo.log_request,
-        req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text
+        req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text, session_id=session_id
     )
     
     async with queue_lock:
@@ -422,15 +442,79 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 content=request.raw_body  # Use the raw body bytes
             )
             r = await client.send(req, stream=True)
-            
+            status_code = r.status_code
+            is_error = status_code >= 400
+            status = "error" if is_error else "completed"
+
+            broadcaster = get_broadcaster()
+            prompt_preview = ""
+            if request.body.get("messages"):
+                msgs = request.body["messages"]
+                if msgs:
+                    last_msg = msgs[-1] if isinstance(msgs, list) else None
+                    if isinstance(last_msg, dict):
+                        prompt_preview = (last_msg.get("content", "") or "")[:500]
+                    else:
+                        prompt_preview = str(last_msg)[:500]
+            elif request.body.get("prompt"):
+                prompt_preview = str(request.body["prompt"])[:500]
+            await broadcaster.request_started(
+                request.request_id,
+                metadata={
+                    "ip": request.ip,
+                    "model": request.model_name,
+                    "path": request.path,
+                    "prompt_preview": prompt_preview,
+                    "session_id": request.session_id or "",
+                },
+            )
+
+            async def on_stream_done(rid: str, full_text: str):
+                total_duration = time.time() - request.timestamp
+                processing_time = time.time() - start_time
+                response_text_val = full_text if full_text else f"[HTTP {status_code}]"
+                outgoing_fp = None
+                if status == "completed" and request.body.get("messages") and full_text is not None:
+                    msgs = request.body.get("messages") or []
+                    if isinstance(msgs, list):
+                        out_state = [{"role": (m.get("role") or ""), "content": (m.get("content") or "")} for m in msgs if isinstance(m, dict)]
+                        out_state.append({"role": "assistant", "content": full_text})
+                        outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
+                await asyncio.to_thread(
+                    request_repo.log_request,
+                    request.request_id,
+                    request.ip,
+                    request.model_name,
+                    status,
+                    total_duration,
+                    priority_score,
+                    response_text=response_text_val,
+                    processing_time_seconds=processing_time,
+                    outgoing_conversation_fingerprint=outgoing_fp,
+                )
+                await broadcaster.request_completed(rid, status)
+
+            def on_chunk(rid: str, delta: str):
+                loop = asyncio.get_running_loop()
+                loop.create_task(broadcaster.chunk(rid, delta))
+
+            # Tee stream: forward raw bytes to client and accumulate response text for logging + live broadcast
+            body_iter = tee_stream(
+                r.aiter_raw(),
+                request.path,
+                request.request_id,
+                on_chunk=on_chunk,
+                on_done=on_stream_done,
+            )
+
             # Create streaming response
             response = StreamingResponse(
-                r.aiter_raw(),
-                status_code=r.status_code,
+                body_iter,
+                status_code=status_code,
                 headers=dict(r.headers),
                 background=BackgroundTask(r.aclose)
             )
-            
+
             # If model wasn't loaded before, trigger immediate VRAM poll
             if not model_was_loaded:
                 async def delayed_poll():
@@ -441,34 +525,17 @@ async def process_request(request: QueuedRequest, priority_score: int):
                         extra={"event": "vram_poll", "request_id": request.request_id}
                     )
                 asyncio.create_task(delayed_poll())
-            
+
             # Set Result
             request.future.set_result(response)
             processing_time = time.time() - start_time
             total_duration = time.time() - request.timestamp
-            
-            # Check if response indicates an error (4xx or 5xx status codes)
-            is_error = r.status_code >= 400
-            status = "error" if is_error else "completed"
-            
+
             if is_error:
                 stats["failed_requests"] += 1
             else:
                 stats["completed_requests"] += 1
-            
-            # Log completion (metadata only, no response parsing)
-            await asyncio.to_thread(
-                request_repo.log_request,
-                request.request_id,
-                request.ip,
-                request.model_name,
-                status,
-                total_duration,
-                priority_score,
-                response_text=f"[HTTP {r.status_code}]",  # Just log status code
-                processing_time_seconds=processing_time
-            )
-            
+
             logger.info(
                 f"[{request.request_id}]",
                 extra={

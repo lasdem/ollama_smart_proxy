@@ -3,16 +3,21 @@ Smart Proxy Admin Endpoints (/proxy/*)
 """
 import time
 import asyncio
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from database import get_db, RequestLog
-from data_access import get_analytics_repo
+from data_access import get_analytics_repo, get_request_log_repo
 
 import logging
 logger = logging.getLogger(__name__)
+
+# Dashboard static files: project root / static / dashboard
+_DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "static" / "dashboard"
 
 router = APIRouter(prefix="/proxy")
 
@@ -78,6 +83,40 @@ async def root():
             "Full Ollama API compatibility"
         ]
     }
+
+
+def _serve_dashboard_file(path: str):
+    """Return FileResponse for a dashboard file; None if not allowed."""
+    if not path or path.startswith(".") or ".." in path or path.startswith("/"):
+        return None
+    full = _DASHBOARD_DIR / path
+    try:
+        full.resolve().relative_to(_DASHBOARD_DIR.resolve())
+    except ValueError:
+        return None
+    if full.is_file():
+        return FileResponse(full)
+    return None
+
+
+@router.get("/dashboard")
+async def proxy_dashboard(request: Request):
+    """Serve monitoring dashboard (admin auth required)."""
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    index = _DASHBOARD_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    return FileResponse(index)
+
+
+@router.get("/dashboard/{path:path}")
+async def proxy_dashboard_asset(request: Request, path: str):
+    """Serve dashboard static assets (admin auth required)."""
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    response = _serve_dashboard_file(path)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return response
 
 
 class TestingControlRequest(BaseModel):
@@ -198,6 +237,7 @@ async def query_db(
     status: Optional[str] = None,
     model: Optional[str] = None,
     ip_address: Optional[str] = None,
+    session_id: Optional[str] = None,
     from_time: Optional[str] = None,
     to_time: Optional[str] = None,
     sort_by: str = "created_at",
@@ -207,16 +247,17 @@ async def query_db(
     """
     Query the requests database with flexible filtering and sorting.
     Admin endpoint only.
-    
+
     Query Parameters:
     - limit: Number of records to return (1-1000, default: 10)
     - offset: Offset for pagination (default: 0)
     - status: Filter by status - comma-separated for multiple (completed, failed, processing, queued)
     - model: Filter by model name (partial match)
     - ip_address: Filter by IP address (exact match)
+    - session_id: Filter by session (conversation) id
     - from_time: Filter requests after this timestamp (ISO format)
     - to_time: Filter requests before this timestamp (ISO format)
-    - sort_by: Sort by field (created_at, timestamp_completed, processing_time_seconds, queue_wait_seconds, priority_score)
+    - sort_by: Sort by field (created_at, timestamp_completed, processing_time_seconds, queue_wait_seconds, priority_score, session_id)
     - sort_order: Sort order (asc, desc, default: desc)
     - fields: Comma-separated list of fields to return (default: all)
     """
@@ -232,7 +273,7 @@ async def query_db(
     # Validate sort_by field
     valid_sort_fields = [
         "created_at", "timestamp_received", "timestamp_started", "timestamp_completed",
-        "processing_time_seconds", "queue_wait_seconds", "priority_score", "duration_seconds"
+        "processing_time_seconds", "queue_wait_seconds", "priority_score", "duration_seconds", "session_id"
     ]
     if sort_by not in valid_sort_fields:
         raise HTTPException(status_code=400, detail=f"Invalid sort_by field. Must be one of: {valid_sort_fields}")
@@ -259,7 +300,10 @@ async def query_db(
         
         if ip_address:
             query = query.filter(RequestLog.source_ip == ip_address)
-        
+
+        if session_id:
+            query = query.filter(RequestLog.session_id == session_id)
+
         if from_time:
             try:
                 # Validate and parse ISO format
@@ -311,6 +355,7 @@ async def query_db(
                 "processing_time_seconds": record.processing_time_seconds,
                 "status": record.status,
                 "error_message": record.error_message,
+                "session_id": record.session_id,
                 "created_at": record.created_at.isoformat() if record.created_at else None
             }
             requests_data.append(record_dict)
@@ -338,6 +383,38 @@ async def query_db(
     except Exception as e:
         logger.error(f"Failed to query database: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to query database: {str(e)}")
+
+
+@router.get("/requests/{request_id}")
+async def proxy_request_detail(request: Request, request_id: str):
+    """
+    Get a single request by request_id. Admin only.
+    Returns full metadata, prompt_text, and response_text for debugging.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    repo = get_request_log_repo()
+    log = repo.get_request_log(request_id)
+    if not log:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return {
+        "id": log.id,
+        "request_id": log.request_id,
+        "ip_address": log.source_ip,
+        "model": log.model_name,
+        "prompt_text": log.prompt_text,
+        "response_text": log.response_text,
+        "timestamp_received": log.timestamp_received.isoformat() if log.timestamp_received else None,
+        "timestamp_started": log.timestamp_started.isoformat() if log.timestamp_started else None,
+        "timestamp_completed": log.timestamp_completed.isoformat() if log.timestamp_completed else None,
+        "duration_seconds": log.duration_seconds,
+        "priority_score": log.priority_score,
+        "queue_wait_seconds": log.queue_wait_seconds,
+        "processing_time_seconds": log.processing_time_seconds,
+        "status": log.status,
+        "error_message": log.error_message,
+        "session_id": log.session_id,
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+    }
 
 
 @router.get("/analytics")
@@ -395,6 +472,44 @@ async def proxy_analytics(
     except Exception as e:
         logger.error(f"Failed to retrieve analytics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
+
+
+@router.websocket("/live")
+async def proxy_live(websocket: WebSocket):
+    """
+    WebSocket for live request/response stream. Admin auth required via
+    static IP, session (from /proxy/auth), or query param key=PROXY_ADMIN_KEY.
+    """
+    client_ip = websocket.client.host if websocket.client else None
+    query = websocket.scope.get("query_string", b"").decode()
+    params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+    key = params.get("key", "")
+
+    if not client_ip:
+        await websocket.close(code=4031)
+        return
+    allowed = (
+        client_ip in _static_admin_ips
+        or (client_ip in _authorized_ips and time.time() < _authorized_ips[client_ip])
+        or (_admin_key and key == _admin_key)
+    )
+    if not allowed:
+        await websocket.close(code=4031)
+        return
+
+    await websocket.accept()
+    from live_broadcaster import get_broadcaster
+    broadcaster = get_broadcaster()
+    await broadcaster.register(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await broadcaster.unregister(websocket)
 
 
 class AuthPayload(BaseModel):

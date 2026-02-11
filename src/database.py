@@ -58,8 +58,10 @@ class RequestLog(Base):
     processing_time_seconds = Column(Float)
     status = Column(String(50), nullable=False, index=True)  # e.g., 'received', 'processing', 'completed', 'failed'
     error_message = Column(Text)
+    session_id = Column(String(255), nullable=True, index=True)  # content-based conversation grouping
+    outgoing_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of messages+response for session matching
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    
+
     def __repr__(self):
         return f"<RequestLog {self.request_id} - {self.status}>"
 
@@ -302,6 +304,8 @@ class DatabaseConnection:
                             processing_time_seconds=record.get('processing_time_seconds'),
                             status=record.get('status'),
                             error_message=record.get('error_message'),
+                            session_id=record.get('session_id'),
+                            outgoing_conversation_fingerprint=record.get('outgoing_conversation_fingerprint'),
                             created_at=datetime.fromisoformat(record.get('created_at')) if record.get('created_at') else datetime.utcnow()
                         )
                         
