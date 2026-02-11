@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for LiteLLM Smart Proxy
+# Multi-stage Dockerfile for Ollama Smart Proxy
 # --- Builder Stage ---
 FROM python:3.11-slim AS builder
 
@@ -34,6 +34,9 @@ RUN apt-get update && \
 COPY src/ ./src/
 COPY run_proxy.sh ./
 COPY .env .env
+
+# Copy dashboard static files (admin monitoring UI at /proxy/dashboard)
+COPY static/ ./static/
 
 # Copy Scripts
 COPY scripts/ ./scripts/
