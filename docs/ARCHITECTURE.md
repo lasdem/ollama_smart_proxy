@@ -169,7 +169,8 @@ See `.env.example` for defaults and examples.
 
 ## 6. Security (Admin Endpoints)
 
-- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/analytics`, `/proxy/requests/*`, `/proxy/dashboard`, `/proxy/dashboard/*`, and WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
+- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/analytics`, `/proxy/requests/*`; WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
+- **Dashboard (public UI, protected data):** `GET /proxy/dashboard` and `GET /proxy/dashboard/*` do **not** require auth, so users can load the page and enter the admin key in the browser. All dashboard data (query_db, request detail, live WebSocket) requires the key (header `X-Admin-Key` or query `?key=`) or IP/session.
 - **Auth:** Static IPs from `ADMIN_IPS`, or IPs that have called `POST /proxy/auth` with correct `key` (24h TTL), or request header `X-Admin-Key` matching `PROXY_ADMIN_KEY`. WebSocket accepts same IP/session or `?key=PROXY_ADMIN_KEY`. Enforced by `verify_admin_access()` (and equivalent checks for WebSocket).
 
 ---

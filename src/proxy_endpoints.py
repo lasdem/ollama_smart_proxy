@@ -101,8 +101,11 @@ def _serve_dashboard_file(path: str):
 
 @router.get("/dashboard")
 async def proxy_dashboard(request: Request):
-    """Serve monitoring dashboard (admin auth required)."""
-    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    """
+    Serve monitoring dashboard. No auth required for this route so users can
+    load the page and enter the admin key in the UI. All data APIs and the
+    live WebSocket remain protected and require the key (header or ?key=).
+    """
     index = _DASHBOARD_DIR / "index.html"
     if not index.is_file():
         raise HTTPException(status_code=404, detail="Dashboard not found")
@@ -111,8 +114,10 @@ async def proxy_dashboard(request: Request):
 
 @router.get("/dashboard/{path:path}")
 async def proxy_dashboard_asset(request: Request, path: str):
-    """Serve dashboard static assets (admin auth required)."""
-    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    """
+    Serve dashboard static assets (HTML, CSS, JS). No auth required so the
+    dashboard page can load; data is protected via API auth.
+    """
     response = _serve_dashboard_file(path)
     if response is None:
         raise HTTPException(status_code=404, detail="Not found")
