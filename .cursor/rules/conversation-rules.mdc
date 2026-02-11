@@ -1,0 +1,20 @@
+---
+description: "Project context and session tracking"
+alwaysApply: true
+---
+## General Rules
+- Questions asked are assumed to be in the context of the repos \\"paysafe-ia-whitelabel\\" and \\"paysafe-ia-whitelabel-database\\" by default.
+
+## Session Tracking
+- At the start of conversations, read `.cursor/logs/work-log.md` to understand recent work history and context
+- At the start of each conversation, automatically create a conversation log in `.cursor/logs/YYYY/MM/DD/conversation-HH-MM-topic-slug.md` (24-hour format) to track the discussion
+- Update the conversation log throughout the session with timeline entries, files modified, and key decisions
+- When completing significant work (features, implementations, major decisions), update `.cursor/logs/work-log.md` with a dated entry and reference the conversation log if relevant
+- Document important patterns and decisions as additional project rules in `.cursor/rules/`
+
+### Conversation Log Structure
+Each conversation log should contain:
+- **Summary**: Brief description of what was discussed/worked on (updated as conversation progresses)
+- **Timeline**: Chronological entries of actions and discussion points (HH:MM format)
+- **Files Modified**: List of files created, edited, or deleted
+- **Decisions & Outcomes**: Key decisions, results, or conclusions reached

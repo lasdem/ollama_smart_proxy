@@ -1,0 +1,40 @@
+---
+description: "Auto-approve file edits in .cursor/ directory"
+alwaysApply: true
+---
+# File Edit Permissions
+
+## Auto-Approve File Edits in .cursor/ Directory
+
+**Purpose**: Configure automatic approval for edits to workspace management files
+
+### File Patterns Auto-Approved
+Files under the `.cursor/` directory do not require user approval for edits:
+- `.cursor/logs/**/*` - All conversation and work logs
+- `.cursor/tests/**/*` - All test library files
+- `.cursor/config/**/*` - Configuration files
+- `.cursor/docs/**/*` - Documentation files
+- `.cursor/scripts/**/*` - Utility scripts
+- `.cursor/rules/**/*` - Rule files themselves
+
+Documentation files do not require user approval for edits:
+- `docs/work-log.md` - Work log and session history
+- `docs/TODO.md` - Implementation roadmap
+- `docs/changelog/**/*` - Changelog files
+- `docs/ARCHITECTURE.md` - Architecture documentation
+- `docs/DEPLOYMENT.md` - Deployment documentation
+- `README.md` - Project README
+- `README_DASHBOARD.md` - Admin dashboard README
+- `.env.example` - Environment variables example
+- `.gitignore` - Git ignore file
+- `.dockerignore` - Docker ignore file
+
+**Rationale**: These are personal workspace files (not production code) that the agent should be able to freely maintain and update as part of session tracking, test management, and documentation.
+
+**Status**: ✅ Confirmed working
+
+## How It Works
+
+This `.mdc` rule file instructs Cursor's agent system to automatically approve file edits for files matching the patterns above. 
+
+**Note**: New file creation still requires approval (as a safety measure), but edits to existing files under `.cursor/` are auto-approved.
