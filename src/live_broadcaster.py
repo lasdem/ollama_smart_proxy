@@ -108,6 +108,26 @@ class LiveBroadcaster:
             "status": status,
         })
 
+    async def request_queued(
+        self, request_id: str, model: str, ip: str
+    ) -> None:
+        await self._broadcast({
+            "type": "request_queued",
+            "request_id": request_id,
+            "model": model,
+            "ip": ip,
+        })
+
+    async def request_processing(
+        self, request_id: str, model: str, ip: str
+    ) -> None:
+        await self._broadcast({
+            "type": "request_processing",
+            "request_id": request_id,
+            "model": model,
+            "ip": ip,
+        })
+
     async def _broadcast(self, payload: Dict[str, Any]) -> None:
         dead = set()
         for ws in self._connections:

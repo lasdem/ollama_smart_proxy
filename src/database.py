@@ -64,6 +64,7 @@ class RequestLog(Base):
     endpoint = Column(String(255), nullable=True)  # e.g. /api/chat, /v1/chat/completions
     user_agent = Column(String(512), nullable=True)  # From request header User-Agent
     thinking_text = Column(Text, nullable=True)  # Reasoning/thinking trace from thinking models
+    request_body = Column(Text, nullable=True)  # Full request body (JSON string), truncated to ~64KB
 
     def __repr__(self):
         return f"<RequestLog {self.request_id} - {self.status}>"
@@ -195,6 +196,10 @@ class DatabaseConnection:
                     conn.execute(text("ALTER TABLE request_logs ADD COLUMN thinking_text TEXT"))
                     conn.commit()
                     logger.info("Added column request_logs.thinking_text")
+                if "request_body" not in existing:
+                    conn.execute(text("ALTER TABLE request_logs ADD COLUMN request_body TEXT"))
+                    conn.commit()
+                    logger.info("Added column request_logs.request_body")
         except Exception as e:
             logger.warning("Migration add columns failed (may already exist): %s", e)
     

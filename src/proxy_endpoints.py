@@ -370,6 +370,7 @@ async def query_db(
                 "endpoint": record.endpoint,
                 "user_agent": record.user_agent,
                 "thinking_text": record.thinking_text,
+                "request_body": record.request_body,
             }
             requests_data.append(record_dict)
         

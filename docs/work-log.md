@@ -72,6 +72,14 @@ Each entry should include:
   - Renamed History tab to Request History; IP filter in query_db changed to partial match (LIKE); added IP filter input in Request History UI.
 - **Related Files:** `src/database.py`, `src/data_access.py`, `src/smart_proxy.py`, `src/proxy_endpoints.py`, `src/stream_tap.py`, `static/dashboard/index.html`, `static/dashboard/app.js`, `tests/test_stream_tap.py`, `docs/TODO.md`, `docs/work-log.md`
 
+### Web dashboard Home tab
+- **Topic:** Admin web dashboard — new Home tab mirroring terminal dashboard
+- **Summary:**
+  - Added Home as the default tab in the web dashboard. Home fetches `/proxy/health`, `/proxy/queue`, `/proxy/vram`, `/proxy/analytics?hours=H&limit=10`, and `/proxy/query_db` (recent completed/error) in parallel. Panels: Health (status, active/max, queue, total), VRAM (total used, loaded models), Queue (status, model, IP, time), Recent (5 completed/error with processing time), Top Models, Top IPs, Avg Perf by Model/IP, Errors by Model/IP. Controls: Refresh button, Hours (24h/72h/7d), Auto-refresh (10s), last-updated indicator. Three-column grid with responsive single column on narrow screens; dash-card styling with colored left borders and compact tables.
+- **Key Findings:**
+  - Default active tab set to `home` in app.js; conversations and history panels start hidden. Analytics and query_db require admin key; panels show “Set key” or error when unauthenticated.
+- **Related Files:** `static/dashboard/index.html`, `static/dashboard/app.js`, `static/dashboard/app.css`, `docs/TODO.md`, `docs/work-log.md`
+
 ---
 
 ## [Current Date]

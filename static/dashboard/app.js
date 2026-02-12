@@ -55,44 +55,289 @@
       if (panel) panel.classList.remove('hidden');
     });
   });
-  document.querySelector('.tabs button[data-tab="conversations"]').classList.add('active');
+  document.querySelector('.tabs button[data-tab="home"]').classList.add('active');
+  document.getElementById('conversations').classList.add('hidden');
   document.getElementById('history').classList.add('hidden');
 
   /* ================================================================
-     CONVERSATIONS (with embedded live + polling)
+     HOME (dashboard overview)
+     ================================================================ */
+  var HOME_DISPLAY_LIMIT = 10;
+  var HOME_RECENT_LIMIT = 5;
+  var DEBOUNCE_MS = 500;
+  var homeDebounceTimer = null;
+  var sessionsDebounceTimer = null;
+  function debouncedLoadHome() {
+    if (homeDebounceTimer) clearTimeout(homeDebounceTimer);
+    homeDebounceTimer = setTimeout(function () { homeDebounceTimer = null; loadHome(); }, DEBOUNCE_MS);
+  }
+  function debouncedLoadSessions() {
+    if (sessionsDebounceTimer) clearTimeout(sessionsDebounceTimer);
+    sessionsDebounceTimer = setTimeout(function () { sessionsDebounceTimer = null; loadSessions(); }, DEBOUNCE_MS);
+  }
+
+  function renderHealth(data) {
+    var el = document.getElementById('homeHealth');
+    if (!el) return;
+    if (!data || data.error) {
+      el.innerHTML = '<div class="dash-status dash-status-error">ERROR</div><div class="dash-kv"><span class="dash-kv-key">Message</span><span>' + escapeHtml(data && data.error ? data.error : 'No Data') + '</span></div>';
+      return;
+    }
+    var status = (data.status || 'unknown').toUpperCase();
+    var paused = data.paused ? ' [PAUSED]' : '';
+    var statusClass = (data.status === 'healthy' && !data.paused) ? 'dash-status-ok' : 'dash-status-error';
+    var active = (data.active_requests != null ? data.active_requests : 0) + '/' + (data.max_parallel != null ? data.max_parallel : 0);
+    var queue = data.queue_depth != null ? data.queue_depth : 0;
+    var total = (data.stats && data.stats.total_requests != null) ? data.stats.total_requests : 0;
+    el.innerHTML =
+      '<div class="dash-status ' + statusClass + '">' + escapeHtml(status) + escapeHtml(paused) + '</div>' +
+      '<div class="dash-kv"><span class="dash-kv-key">Active</span><span>' + escapeHtml(String(active)) + '</span></div>' +
+      '<div class="dash-kv"><span class="dash-kv-key">Queue</span><span>' + escapeHtml(String(queue)) + '</span></div>' +
+      '<div class="dash-kv"><span class="dash-kv-key">Total</span><span>' + escapeHtml(String(total)) + '</span></div>';
+  }
+
+  function renderVram(data) {
+    var el = document.getElementById('homeVram');
+    if (!el) return;
+    if (!data || data.error) {
+      el.innerHTML = '<div class="dash-muted">N/A</div>';
+      return;
+    }
+    var totalMb = data.total_vram_used_mb != null ? data.total_vram_used_mb : 0;
+    var totalGb = (totalMb / 1024).toFixed(1);
+    var models = data.models || {};
+    var rows = Object.keys(models).slice(0, 5).map(function (m) {
+      var info = models[m];
+      var mb = (info && typeof info === 'object' && info.vram_mb != null) ? info.vram_mb : 0;
+      var gb = (mb / 1024).toFixed(1);
+      return '<tr><td>' + escapeHtml(String(m).slice(0, 40)) + '</td><td class="dash-num">' + gb + ' GB</td></tr>';
+    }).join('');
+    el.innerHTML = '<div class="dash-kv"><span class="dash-kv-key">Total</span><span>' + totalGb + ' GB Used</span></div><table class="dash-table"><thead><tr><th>Model</th><th>Size</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function renderQueue(data) {
+    var el = document.getElementById('homeQueue');
+    if (!el) return;
+    if (!data || data.error) {
+      el.innerHTML = '<div class="dash-muted">Error</div>';
+      return;
+    }
+    var reqs = data.requests || [];
+    reqs.sort(function (a, b) {
+      var ap = a.status === 'processing' ? 0 : 1;
+      var bp = b.status === 'processing' ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+      return (b.priority != null ? b.priority : 999) - (a.priority != null ? a.priority : 999);
+    });
+    if (reqs.length === 0) {
+      el.innerHTML = '<div class="dash-muted">Queue Empty</div>';
+      return;
+    }
+    var rows = reqs.slice(0, 40).map(function (r) {
+      var icon = r.status === 'processing' ? '&#9889;' : '&#9201;';
+      var dur = r.total_duration != null ? r.total_duration : r.wait_time;
+      var durStr = (dur != null && !isNaN(parseFloat(dur))) ? parseFloat(dur).toFixed(1) + 's' : '0s';
+      return '<tr><td class="dash-icon">' + icon + '</td><td>' + escapeHtml(String(r.model || '?').slice(0, 40)) + '</td><td class="dash-dim">' + escapeHtml(String(r.ip || '?').slice(0, 15)) + '</td><td class="dash-num">' + durStr + '</td></tr>';
+    }).join('');
+    el.innerHTML = '<table class="dash-table"><thead><tr><th>St</th><th>Model</th><th>IP</th><th>Time</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function renderRecent(data) {
+    var el = document.getElementById('homeRecent');
+    if (!el) return;
+    var card = el.closest('.dash-card');
+    var titleEl = card ? card.querySelector('.dash-card-title') : null;
+    var totalCount = (data && data.total_count != null) ? data.total_count : 0;
+    var setTitle = function (shown, total) {
+      if (titleEl) titleEl.textContent = 'Recent (' + shown + '/' + total + ')';
+    };
+    if (!data || data.error) {
+      setTitle(0, totalCount);
+      el.innerHTML = '<div class="dash-muted">No Data</div>';
+      return;
+    }
+    var recent = data.requests || [];
+    var shown = Math.min(recent.length, HOME_RECENT_LIMIT);
+    setTitle(shown, totalCount);
+    var rows = recent.slice(0, HOME_RECENT_LIMIT).map(function (r) {
+      var status = r.status || '';
+      var icon = status === 'completed' || status === 'success' ? '&#10003;' : (status === 'error' || status === 'failed' ? '&#10007;' : '?');
+      var iconClass = status === 'completed' || status === 'success' ? 'dash-icon-ok' : (status === 'error' || status === 'failed' ? 'dash-icon-err' : 'dash-icon-warn');
+      var dur = r.processing_time_seconds;
+      var durStr = (dur != null && !isNaN(parseFloat(dur))) ? parseFloat(dur).toFixed(1) + 's' : '0.0s';
+      return '<tr><td class="dash-icon ' + iconClass + '">' + icon + '</td><td>' + escapeHtml(String(r.model || '?').slice(0, 40)) + '</td><td class="dash-dim">' + escapeHtml(String(r.ip_address || '?').slice(0, 15)) + '</td><td class="dash-num">' + durStr + '</td></tr>';
+    }).join('');
+    if (rows.length === 0) {
+      el.innerHTML = '<div class="dash-muted">No Recent Requests</div>';
+      return;
+    }
+    el.innerHTML = '<table class="dash-table"><thead><tr><th>St</th><th>Model</th><th>IP</th><th>Time</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function renderTopModels(data) {
+    var el = document.getElementById('homeTopModels');
+    if (!el) return;
+    var list = (data && data.request_count_by_model) ? data.request_count_by_model : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      return '<tr><td>' + escapeHtml(String(x.model || '?').slice(0, 40)) + '</td><td class="dash-num">' + (x.request_count != null ? x.request_count : 0) + '</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>Name</th><th>Reqs</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function renderTopIps(data) {
+    var el = document.getElementById('homeTopIps');
+    if (!el) return;
+    var list = (data && data.request_count_by_ip) ? data.request_count_by_ip : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      return '<tr><td>' + escapeHtml(x.ip_address || '?') + '</td><td class="dash-num">' + (x.request_count != null ? x.request_count : 0) + '</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>IP</th><th>Reqs</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function renderPerfModel(data) {
+    var el = document.getElementById('homePerfModel');
+    if (!el) return;
+    var list = (data && data.perf_by_model) ? data.perf_by_model : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      var w = x.avg_wait_seconds != null ? x.avg_wait_seconds : 0;
+      var p = x.avg_processing_seconds != null ? x.avg_processing_seconds : 0;
+      return '<tr><td>' + escapeHtml(String(x.group || '?').slice(0, 40)) + '</td><td class="dash-num">' + w.toFixed(1) + 's</td><td class="dash-num">' + p.toFixed(1) + 's</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>Name</th><th>Q Wait</th><th>Run</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function renderPerfIp(data) {
+    var el = document.getElementById('homePerfIp');
+    if (!el) return;
+    var list = (data && data.perf_by_ip) ? data.perf_by_ip : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      var w = x.avg_wait_seconds != null ? x.avg_wait_seconds : 0;
+      var p = x.avg_processing_seconds != null ? x.avg_processing_seconds : 0;
+      return '<tr><td>' + escapeHtml(String(x.group || '?')) + '</td><td class="dash-num">' + w.toFixed(1) + 's</td><td class="dash-num">' + p.toFixed(1) + 's</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>IP</th><th>Q Wait</th><th>Run</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function renderErrorsModel(data) {
+    var el = document.getElementById('homeErrorsModel');
+    if (!el) return;
+    var list = (data && data.error_rate_analysis) ? data.error_rate_analysis : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      var pct = x.error_rate_percent != null ? x.error_rate_percent : 0;
+      return '<tr><td>' + escapeHtml(String(x.group || '?').slice(0, 40)) + '</td><td class="dash-num">' + pct.toFixed(1) + '%</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>Name</th><th>%</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function renderErrorsIp(data) {
+    var el = document.getElementById('homeErrorsIp');
+    if (!el) return;
+    var list = (data && data.error_rate_by_ip) ? data.error_rate_by_ip : [];
+    var rows = list.slice(0, HOME_DISPLAY_LIMIT).map(function (x) {
+      var pct = x.error_rate_percent != null ? x.error_rate_percent : 0;
+      return '<tr><td>' + escapeHtml(String(x.group || '?').slice(0, 15)) + '</td><td class="dash-num">' + pct.toFixed(1) + '%</td></tr>';
+    }).join('');
+    el.innerHTML = rows ? '<table class="dash-table"><thead><tr><th>IP</th><th>%</th></tr></thead><tbody>' + rows + '</tbody></table>' : '<div class="dash-muted">No data</div>';
+  }
+
+  function loadHome() {
+    var key = getKey();
+    var hours = parseInt(document.getElementById('homeHours').value, 10) || 72;
+    var fromTime = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    var healthPromise = fetch(API_BASE + '/health', { headers: apiHeaders() }).then(function (r) { return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; });
+    var queuePromise = fetch(API_BASE + '/queue', { headers: apiHeaders() }).then(function (r) { return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; });
+    var vramPromise = fetch(API_BASE + '/vram', { headers: apiHeaders() }).then(function (r) { return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; });
+    var analyticsPromise = key
+      ? fetch(API_BASE + '/analytics?hours=' + encodeURIComponent(hours) + '&limit=' + HOME_DISPLAY_LIMIT, { headers: apiHeaders() }).then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; })
+      : Promise.resolve({ error: 'Set key for analytics' });
+    var recentPromise = key
+      ? fetch(API_BASE + '/query_db?limit=' + HOME_RECENT_LIMIT + '&status=completed,error&sort_by=timestamp_completed&sort_order=desc&from_time=' + encodeURIComponent(fromTime), { headers: apiHeaders() }).then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; })
+      : Promise.resolve({ error: 'Set key for recent' });
+    Promise.all([healthPromise, queuePromise, vramPromise, analyticsPromise, recentPromise]).then(function (results) {
+      var health = results[0];
+      var queue = results[1];
+      var vram = results[2];
+      var analytics = results[3];
+      var recent = results[4];
+      renderHealth(health);
+      renderVram(vram);
+      renderQueue(queue);
+      renderRecent(recent);
+      if (analytics && !analytics.error) {
+        renderTopModels(analytics);
+        renderTopIps(analytics);
+        renderPerfModel(analytics);
+        renderPerfIp(analytics);
+        renderErrorsModel(analytics);
+        renderErrorsIp(analytics);
+      } else {
+        ['homeTopModels', 'homeTopIps', 'homePerfModel', 'homePerfIp', 'homeErrorsModel', 'homeErrorsIp'].forEach(function (id) {
+          var e = document.getElementById(id);
+          if (e) e.innerHTML = '<div class="dash-muted">' + (analytics && analytics.error ? escapeHtml(analytics.error) : 'Set key') + '</div>';
+        });
+      }
+      var lastEl = document.getElementById('homeLastUpdated');
+      if (lastEl) lastEl.textContent = new Date().toLocaleTimeString();
+    });
+  }
+
+  document.getElementById('loadHome').addEventListener('click', function () { loadHome(); });
+  if (getKey()) loadHome();
+
+  /* ================================================================
+     CONVERSATIONS (with embedded live) — shared WebSocket, event-driven refresh
      ================================================================ */
   var ws = null;
   var wsStatusEl = document.getElementById('wsStatus');
-  var pollTimer = null;
-  var liveAccumulated = {}; // request_id -> accumulated full text from WS chunks
-  var liveThinkingAccumulated = {}; // request_id -> accumulated thinking from WS chunks
+  var homeWsStatusEl = document.getElementById('homeWsStatus');
+  var liveMode = false; // true when user clicked "Go live" (chunk streaming into threads)
+  var liveAccumulated = {};
+  var liveThinkingAccumulated = {};
+  var reconnectDelay = 2000;
+  var maxReconnectDelay = 30000;
+  var reconnectTimer = null;
+  var intentionalDisconnect = false;
 
-  /* -- WebSocket live -- */
-  document.getElementById('connectWs').addEventListener('click', function () {
+  function setWsStatus(text, color) {
+    if (wsStatusEl) { wsStatusEl.textContent = text; wsStatusEl.style.color = color || ''; }
+    if (homeWsStatusEl) { homeWsStatusEl.textContent = text; homeWsStatusEl.style.color = color || ''; }
+  }
+
+  function buildLiveWsUrl() {
     var key = getKey();
-    if (!key) { setAuthStatus(false, 'Set key first'); return; }
-    if (ws && ws.readyState === WebSocket.OPEN) return;
+    if (!key) return null;
     var proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    var url = proto + '//' + window.location.host + API_BASE + '/live?key=' + encodeURIComponent(key);
+    return proto + '//' + window.location.host + API_BASE + '/live?key=' + encodeURIComponent(key);
+  }
+
+  function connectLiveWs() {
+    var url = buildLiveWsUrl();
+    if (!url) return;
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    intentionalDisconnect = false;
     ws = new WebSocket(url);
-    wsStatusEl.textContent = 'connecting…';
+    setWsStatus('connecting…');
     ws.onopen = function () {
-      wsStatusEl.textContent = 'live';
-      wsStatusEl.style.color = '#0f0';
+      reconnectDelay = 2000;
+      setWsStatus('live', '#0f0');
       document.getElementById('connectWs').classList.add('hidden');
       document.getElementById('disconnectWs').classList.remove('hidden');
     };
     ws.onmessage = function (ev) {
       try {
         var msg = JSON.parse(ev.data);
+        if (msg.type === 'request_queued' || msg.type === 'request_processing' || msg.type === 'request_started' || msg.type === 'request_completed') {
+          debouncedLoadHome();
+        }
         if (msg.type === 'request_started') {
           var sid = msg.metadata && msg.metadata.session_id;
-          // Refresh session list to show the new request + auto-open if live
-          if (sid && !currentSessionRequests) {
-            pendingLiveOpen = sid;
-          }
-          loadSessions();
-        } else if (msg.type === 'chunk') {
+          if (sid && !currentSessionRequests) pendingLiveOpen = sid;
+          debouncedLoadSessions();
+        } else if (msg.type === 'request_completed') {
+          delete liveAccumulated[msg.request_id];
+          delete liveThinkingAccumulated[msg.request_id];
+          debouncedLoadSessions();
+        } else if (msg.type === 'chunk' && liveMode) {
           var kind = msg.kind || 'content';
           var fullText = msg.full !== undefined ? msg.full : ((liveAccumulated[msg.request_id] || '') + (msg.delta || ''));
           var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
@@ -102,7 +347,7 @@
           if (row) {
             if (kind === 'thinking') {
               var thinkingPre = row.querySelector('.thread-thinking .streamable-thinking');
-              if (thinkingPre) { thinkingPre.textContent = fullThinking; }
+              if (thinkingPre) thinkingPre.textContent = fullThinking;
               var thinkingDetails = row.querySelector('.thread-thinking');
               if (thinkingDetails) thinkingDetails.setAttribute('open', 'open');
             } else {
@@ -111,28 +356,54 @@
               var thinkingDetails = row.querySelector('.thread-thinking');
               if (thinkingDetails) thinkingDetails.removeAttribute('open');
             }
-            if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === msg.request_id; })) {
-              scrollThreadToBottom();
-            }
+            if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === msg.request_id; })) scrollThreadToBottom();
           }
-        } else if (msg.type === 'request_completed') {
-          delete liveAccumulated[msg.request_id];
-          delete liveThinkingAccumulated[msg.request_id];
-          loadSessions();
         }
       } catch (_) {}
     };
     ws.onclose = function () {
-      wsStatusEl.textContent = '';
+      ws = null;
+      setWsStatus('');
       document.getElementById('connectWs').classList.remove('hidden');
       document.getElementById('disconnectWs').classList.add('hidden');
-      ws = null;
+      if (!intentionalDisconnect && getKey()) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(function () {
+          reconnectTimer = null;
+          connectLiveWs();
+          reconnectDelay = Math.min(reconnectDelay * 2, maxReconnectDelay);
+        }, reconnectDelay);
+      }
     };
-    ws.onerror = function () { wsStatusEl.textContent = 'error'; wsStatusEl.style.color = '#f44'; };
+    ws.onerror = function () { setWsStatus('error', '#f44'); };
+  }
+
+  document.getElementById('connectWs').addEventListener('click', function () {
+    if (!getKey()) { setAuthStatus(false, 'Set key first'); return; }
+    liveMode = true;
+    connectLiveWs();
   });
   document.getElementById('disconnectWs').addEventListener('click', function () {
+    liveMode = false;
+    intentionalDisconnect = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (ws && ws.readyState === WebSocket.OPEN) ws.close();
   });
+
+  if (getKey()) connectLiveWs();
+
+  var convLimitEl = document.getElementById('convLimit');
+  if (convLimitEl) {
+    var savedConvLimit = sessionStorage.getItem('conv_limit');
+    if (savedConvLimit !== null) convLimitEl.value = savedConvLimit;
+    convLimitEl.addEventListener('change', function () { sessionStorage.setItem('conv_limit', this.value); });
+  }
+  var historyLimitEl = document.getElementById('limit');
+  if (historyLimitEl) {
+    var savedHistoryLimit = sessionStorage.getItem('history_limit');
+    if (savedHistoryLimit !== null) historyLimitEl.value = savedHistoryLimit;
+    historyLimitEl.addEventListener('change', function () { sessionStorage.setItem('history_limit', this.value); });
+  }
 
   function findAssistantDiv(requestId) {
     var divs = document.querySelectorAll('#threadMessages .thread-msg[data-request-id]');
@@ -151,16 +422,6 @@
     if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
   }
 
-  /* -- Polling -- */
-  document.getElementById('autoPoll').addEventListener('change', function () {
-    if (this.checked) {
-      loadSessions();
-      pollTimer = setInterval(loadSessions, 10000);
-    } else {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    }
-  });
-
   /* -- Sessions list -- */
   var currentSessionRequests = null;
   var pendingLiveOpen = null; // session_id string to auto-open after loadSessions
@@ -168,7 +429,11 @@
   function loadSessions() {
     var key = getKey();
     if (!key) { setAuthStatus(false, 'Set key first'); return; }
-    fetch(API_BASE + '/query_db?limit=500&sort_by=timestamp_received&sort_order=desc', { headers: apiHeaders() })
+    var limitEl = document.getElementById('convLimit');
+    var limit = (limitEl && limitEl.value) ? parseInt(limitEl.value, 10) : 100;
+    if (isNaN(limit) || limit < 1) limit = 100;
+    if (limit > 1000) limit = 1000;
+    fetch(API_BASE + '/query_db?limit=' + limit + '&sort_by=timestamp_received&sort_order=desc', { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
         var bySession = {};
@@ -408,7 +673,17 @@
           detailParts += '\n\n--- Response ---\n' + (req.response_text || '');
         }
         document.getElementById('detailText').textContent = detailParts;
-        document.getElementById('detailRaw').textContent = JSON.stringify(req, null, 2);
+        var rawContent;
+        if (req.request_body && req.request_body.trim()) {
+          try {
+            rawContent = JSON.stringify(JSON.parse(req.request_body), null, 2);
+          } catch (_) {
+            rawContent = req.request_body;
+          }
+        } else {
+          rawContent = JSON.stringify(req, null, 2);
+        }
+        document.getElementById('detailRaw').textContent = rawContent;
         document.getElementById('detailModal').classList.remove('hidden');
         document.getElementById('detailText').classList.remove('hidden');
         document.getElementById('detailRaw').classList.add('hidden');

@@ -315,12 +315,23 @@ async def enqueue_request(request: Request, path: str):
 
     queued_req.session_id = session_id
 
+    # Full request body for raw JSON view (truncate to ~64KB)
+    request_body_str = None
+    if raw_body:
+        try:
+            request_body_str = raw_body.decode("utf-8", errors="replace")
+            if len(request_body_str) > 65536:
+                request_body_str = request_body_str[:65536]
+        except Exception:
+            pass
+
     # Log to DB
     await asyncio.to_thread(
         request_repo.log_request,
         req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text, session_id=session_id,
         endpoint=path,
         user_agent=request.headers.get("user-agent"),
+        request_body=request_body_str,
     )
     
     async with queue_lock:
@@ -330,7 +341,10 @@ async def enqueue_request(request: Request, path: str):
         current_depth = len(request_queue)
         if current_depth > stats["queue_depth_max"]:
             stats["queue_depth_max"] = current_depth
-    
+
+    broadcaster = get_broadcaster()
+    await broadcaster.request_queued(req_id, model_name, client_ip)
+
     logger.info(f"[{req_id}] Queued for {path}", extra={"event": "queued"})
     
     # Wait for the Worker to process it
@@ -397,7 +411,13 @@ async def queue_worker():
                 }
             )
             tracker.add_request(selected_request.ip, selected_request.model_name)
-        # Start processing
+        # Broadcast and start processing (outside lock to avoid blocking)
+        _broadcaster = get_broadcaster()
+        await _broadcaster.request_processing(
+            selected_request.request_id,
+            selected_request.model_name,
+            selected_request.ip,
+        )
         asyncio.create_task(process_request(selected_request, priority_score))
 
 async def process_request(request: QueuedRequest, priority_score: int):
