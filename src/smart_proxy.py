@@ -298,7 +298,8 @@ async def enqueue_request(request: Request, path: str):
 
     priority_score = tracker.calculate_priority(queued_req)
     # Content-based session: same session when request's message prefix matches a previous request's messages+response
-    session_id = f"{client_ip}_{int(queued_req.timestamp)}"
+    # Default: unique per request so concurrent single-turn requests don't collapse into one session
+    session_id = f"{client_ip}_{model_name}_{req_id}"
     try:
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
         if len(messages) > 1:
@@ -471,16 +472,16 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 },
             )
 
-            async def on_stream_done(rid: str, full_text: str):
+            async def on_stream_done(rid: str, full_content: str, full_thinking: str):
                 total_duration = time.time() - request.timestamp
                 processing_time = time.time() - start_time
-                response_text_val = full_text if full_text else f"[HTTP {status_code}]"
+                response_text_val = full_content if full_content else f"[HTTP {status_code}]"
                 outgoing_fp = None
-                if status == "completed" and request.body.get("messages") and full_text is not None:
+                if status == "completed" and request.body.get("messages") and full_content is not None:
                     msgs = request.body.get("messages") or []
                     if isinstance(msgs, list):
                         out_state = [{"role": (m.get("role") or ""), "content": (m.get("content") or "")} for m in msgs if isinstance(m, dict)]
-                        out_state.append({"role": "assistant", "content": full_text})
+                        out_state.append({"role": "assistant", "content": full_content})
                         outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
                 await asyncio.to_thread(
                     request_repo.log_request,
@@ -495,12 +496,13 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     outgoing_conversation_fingerprint=outgoing_fp,
                     endpoint=request.path,
                     user_agent=request.raw_request.headers.get("user-agent"),
+                    thinking_text=full_thinking or None,
                 )
                 await broadcaster.request_completed(rid, status)
 
-            def on_chunk(rid: str, delta: str):
+            def on_chunk(rid: str, delta: str, kind: str = "content"):
                 loop = asyncio.get_running_loop()
-                loop.create_task(broadcaster.chunk(rid, delta))
+                loop.create_task(broadcaster.chunk(rid, delta, kind))
 
             # Tee stream: forward raw bytes to client and accumulate response text for logging + live broadcast
             body_iter = tee_stream(
@@ -566,7 +568,10 @@ async def process_request(request: QueuedRequest, priority_score: int):
             "error",
             total_duration,
             priority_score,
-            processing_time_seconds=processing_time
+            processing_time_seconds=processing_time,
+            response_text=f"[Error] {str(e)}",
+            endpoint=request.path,
+            user_agent=request.raw_request.headers.get("user-agent"),
         )
         
         logger.exception(f"[{request.request_id}] Request Failed")

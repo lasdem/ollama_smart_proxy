@@ -65,6 +65,7 @@
   var wsStatusEl = document.getElementById('wsStatus');
   var pollTimer = null;
   var liveAccumulated = {}; // request_id -> accumulated full text from WS chunks
+  var liveThinkingAccumulated = {}; // request_id -> accumulated thinking from WS chunks
 
   /* -- WebSocket live -- */
   document.getElementById('connectWs').addEventListener('click', function () {
@@ -92,21 +93,31 @@
           }
           loadSessions();
         } else if (msg.type === 'chunk') {
-          // Store accumulated text so thread rebuilds preserve streaming content
+          var kind = msg.kind || 'content';
           var fullText = msg.full !== undefined ? msg.full : ((liveAccumulated[msg.request_id] || '') + (msg.delta || ''));
+          var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
           liveAccumulated[msg.request_id] = fullText;
-          // Update DOM directly if the assistant div exists
+          liveThinkingAccumulated[msg.request_id] = fullThinking;
           var row = findAssistantDiv(msg.request_id);
           if (row) {
-            var streamEl = row.querySelector('.body.streamable');
-            if (streamEl) { streamEl.textContent = fullText; }
-            // Keep thread scrolled to bottom when this request is in the open session
+            if (kind === 'thinking') {
+              var thinkingPre = row.querySelector('.thread-thinking .streamable-thinking');
+              if (thinkingPre) { thinkingPre.textContent = fullThinking; }
+              var thinkingDetails = row.querySelector('.thread-thinking');
+              if (thinkingDetails) thinkingDetails.setAttribute('open', 'open');
+            } else {
+              var streamEl = row.querySelector('.body.streamable');
+              if (streamEl) streamEl.textContent = fullText;
+              var thinkingDetails = row.querySelector('.thread-thinking');
+              if (thinkingDetails) thinkingDetails.removeAttribute('open');
+            }
             if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === msg.request_id; })) {
               scrollThreadToBottom();
             }
           }
         } else if (msg.type === 'request_completed') {
           delete liveAccumulated[msg.request_id];
+          delete liveThinkingAccumulated[msg.request_id];
           loadSessions();
         }
       } catch (_) {}
@@ -245,13 +256,18 @@
       var userTime = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
       var asstDuration = fmtDurationShort(req.duration_seconds);
       var isLive = (req.status === 'processing' || req.status === 'queued');
-      // Determine assistant body: use live accumulated text if available, else API response_text
+      // Determine assistant body: use live accumulated text if available, else API response_text or error_message
       var responseBody = '';
       if (liveAccumulated[reqId]) {
         responseBody = escapeHtml(liveAccumulated[reqId]);
       } else {
-        responseBody = renderMarkdown(req.response_text || '');
+        var respText = req.response_text || '';
+        if (!respText && req.error_message) respText = req.error_message;
+        responseBody = (respText && (respText.indexOf('[HTTP') === 0 || respText.indexOf('[Error]') === 0))
+          ? escapeHtml(respText)
+          : renderMarkdown(respText);
       }
+      var isError = req.status === 'error';
       // User message
       var userDiv = document.createElement('div');
       userDiv.className = 'thread-msg user';
@@ -271,14 +287,24 @@
         }
       });
       container.appendChild(userDiv);
-      // Assistant message
+      // Assistant message: optional thinking block (collapsible; for past collapsed by default; for live open when thinking is streaming)
+      var hasThinking = !!(req.thinking_text && req.thinking_text.trim());
+      var liveThinking = isLive && (liveThinkingAccumulated[reqId] || '');
+      var thinkingHtml = '';
+      if (hasThinking || liveThinking) {
+        var thinkingContent = (req.thinking_text && req.thinking_text.trim()) || liveThinking || '';
+        var thinkingEscaped = escapeHtml(thinkingContent);
+        var thinkingOpen = isLive && liveThinking && !(liveAccumulated[reqId] || responseBody);
+        thinkingHtml = '<details class="thread-thinking' + (isLive ? ' thread-thinking-live' : '') + '"' + (thinkingOpen ? ' open' : '') + '><summary>Thinking</summary><pre class="thread-thinking-body' + (isLive ? ' streamable-thinking' : '') + '">' + thinkingEscaped + '</pre></details>';
+      }
       var asstDiv = document.createElement('div');
-      asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '');
+      asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
       asstDiv.setAttribute('data-request-id', reqId);
       asstDiv.innerHTML =
         '<div class="role">Assistant · ' + escapeHtml(req.model || '') + ' · ' +
         (isLive ? '<span class="streaming-indicator">streaming…</span>' : escapeHtml(asstDuration)) +
         '</div>' +
+        thinkingHtml +
         '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>';
       container.appendChild(asstDiv);
     });
@@ -296,6 +322,7 @@
       ['Processing', fmtDuration(req.processing_time_seconds)],
       ['Priority', req.priority_score],
       ['Session', req.session_id],
+      ['Endpoint', req.endpoint],
       ['User-Agent', req.user_agent],
       ['Received', req.timestamp_received],
       ['Started', req.timestamp_started],
@@ -340,6 +367,7 @@
             '<td>' + fmtDuration(req.queue_wait_seconds) + '</td>' +
             '<td>' + fmtDuration(req.processing_time_seconds) + '</td>' +
             '<td>' + escapeHtml((req.session_id || '').slice(0, 16)) + '</td>' +
+            '<td>' + escapeHtml((req.endpoint || '').replace(/^\/+/, '')) + '</td>' +
             '<td><a href="#" data-rid="' + escapeHtml(req.request_id) + '">Detail</a></td>';
           tr.querySelector('a').addEventListener('click', function (e) { e.preventDefault(); openDetail(req.request_id); });
           tbody.appendChild(tr);
@@ -373,8 +401,13 @@
         metaRows.forEach(function (r) { metaHtml += '<tr><td class="meta-key">' + escapeHtml(String(r[0])) + '</td><td>' + escapeHtml(String(r[1])) + '</td></tr>'; });
         metaHtml += '</tbody></table>';
         document.querySelector('.detail-meta').innerHTML = metaHtml;
-        document.getElementById('detailText').textContent =
-          '--- Request (prompt) ---\n' + (req.prompt_text || '') + '\n\n--- Response ---\n' + (req.response_text || '');
+        var detailParts = '--- Request (prompt) ---\n' + (req.prompt_text || '');
+        if (req.thinking_text && req.thinking_text.trim()) {
+          detailParts += '\n\n--- Thinking ---\n' + req.thinking_text.trim() + '\n\n--- Response ---\n' + (req.response_text || '');
+        } else {
+          detailParts += '\n\n--- Response ---\n' + (req.response_text || '');
+        }
+        document.getElementById('detailText').textContent = detailParts;
         document.getElementById('detailRaw').textContent = JSON.stringify(req, null, 2);
         document.getElementById('detailModal').classList.remove('hidden');
         document.getElementById('detailText').classList.remove('hidden');

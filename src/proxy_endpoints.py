@@ -304,7 +304,12 @@ async def query_db(
             query = query.filter(RequestLog.model_name.like(f"%{model}%"))
         
         if ip_address:
-            query = query.filter(RequestLog.source_ip.like(f"%{ip_address}%"))
+            if "*" in ip_address:
+                # Partial match: * is the only wildcard, becomes % for LIKE
+                pattern = ip_address.replace("*", "%")
+                query = query.filter(RequestLog.source_ip.like(pattern))
+            else:
+                query = query.filter(RequestLog.source_ip == ip_address)
 
         if session_id:
             query = query.filter(RequestLog.session_id == session_id)
@@ -364,6 +369,7 @@ async def query_db(
                 "created_at": record.created_at.isoformat() if record.created_at else None,
                 "endpoint": record.endpoint,
                 "user_agent": record.user_agent,
+                "thinking_text": record.thinking_text,
             }
             requests_data.append(record_dict)
         
@@ -423,6 +429,7 @@ async def proxy_request_detail(request: Request, request_id: str):
         "created_at": log.created_at.isoformat() if log.created_at else None,
         "endpoint": log.endpoint,
         "user_agent": log.user_agent,
+        "thinking_text": log.thinking_text,
     }
 
 

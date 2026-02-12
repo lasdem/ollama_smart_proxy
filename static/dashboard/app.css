@@ -39,6 +39,8 @@ body { font-family: system-ui, sans-serif; margin: 0; background: #1a1a1a; color
 .thread-msg { margin-bottom: 1rem; padding: 0.75rem; background: #252525; border-radius: 6px; border-left: 3px solid #0a7; }
 .thread-msg.user { border-left-color: #f80; }
 .thread-msg.thread-msg-live { border-left-color: #0f0; }
+.thread-msg.thread-msg-error { border-left-color: #c44; }
+.thread-msg.thread-msg-error .body { color: #f88; }
 .streaming-indicator { color: #0f0; font-weight: 600; animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 .thread-msg .role { font-size: 0.75rem; color: #888; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem; }
@@ -51,6 +53,11 @@ body { font-family: system-ui, sans-serif; margin: 0; background: #1a1a1a; color
 .thread-msg .markdown-body strong { font-weight: 600; }
 .thread-msg .markdown-body p { margin: 0.5rem 0; }
 .thread-msg .markdown-body hr { border: none; border-top: 1px solid #444; margin: 0.75rem 0; }
+
+/* Thinking block in thread (collapsible) */
+.thread-thinking { margin-bottom: 0.5rem; font-size: 0.85rem; }
+.thread-thinking summary { cursor: pointer; color: #0af; }
+.thread-thinking-body { white-space: pre-wrap; margin: 0.25rem 0 0; padding: 0.5rem; background: #1e1e1e; border-radius: 4px; color: #aaa; font-size: 0.85em; max-height: 12rem; overflow-y: auto; }
 
 /* Metadata toggle in thread */
 .meta-toggle { background: transparent; border: 1px solid #555; color: #888; padding: 0 0.4rem; border-radius: 3px; cursor: pointer; font-size: 0.8rem; line-height: 1.2; }

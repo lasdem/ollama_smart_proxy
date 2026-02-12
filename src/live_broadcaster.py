@@ -36,12 +36,15 @@ class LiveBroadcaster:
                         "metadata": data.get("metadata", {}),
                     })
                     acc = data.get("accumulated", "")
-                    if acc:
+                    acc_thinking = data.get("accumulated_thinking", "")
+                    if acc or acc_thinking:
                         await ws.send_json({
                             "type": "chunk",
                             "request_id": request_id,
                             "delta": "",
                             "full": acc,
+                            "kind": "content",
+                            "full_thinking": acc_thinking,
                         })
                 except Exception as e:
                     logger.warning("broadcaster send snapshot to new client failed: %s", e)
@@ -59,6 +62,7 @@ class LiveBroadcaster:
             self._active[request_id] = {
                 "metadata": metadata or {},
                 "accumulated": "",
+                "accumulated_thinking": "",
             }
         await self._broadcast({
             "type": "request_started",
@@ -66,21 +70,33 @@ class LiveBroadcaster:
             "metadata": metadata or {},
         })
 
-    async def chunk(self, request_id: str, delta: str) -> None:
-        full: Optional[str] = None
+    async def chunk(self, request_id: str, delta: str, kind: str = "content") -> None:
+        full_content: Optional[str] = None
+        full_thinking: Optional[str] = None
         async with self._lock:
             if request_id in self._active:
-                acc = self._active[request_id]["accumulated"] + delta
-                if len(acc) > self._max_accumulated:
-                    acc = acc[-self._max_accumulated:]
-                self._active[request_id]["accumulated"] = acc
-                full = acc
-        if full is not None:
+                if kind == "thinking":
+                    acc = self._active[request_id]["accumulated_thinking"] + delta
+                    if len(acc) > self._max_accumulated:
+                        acc = acc[-self._max_accumulated:]
+                    self._active[request_id]["accumulated_thinking"] = acc
+                    full_thinking = acc
+                    full_content = self._active[request_id]["accumulated"]
+                else:
+                    acc = self._active[request_id]["accumulated"] + delta
+                    if len(acc) > self._max_accumulated:
+                        acc = acc[-self._max_accumulated:]
+                    self._active[request_id]["accumulated"] = acc
+                    full_content = acc
+                    full_thinking = self._active[request_id]["accumulated_thinking"]
+        if full_content is not None or full_thinking is not None:
             await self._broadcast({
                 "type": "chunk",
                 "request_id": request_id,
                 "delta": delta,
-                "full": full,
+                "full": full_content or "",
+                "kind": kind,
+                "full_thinking": full_thinking or "",
             })
 
     async def request_completed(self, request_id: str, status: str) -> None:

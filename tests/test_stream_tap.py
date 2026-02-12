@@ -14,23 +14,35 @@ from stream_tap import extract_text_from_ndjson, tee_stream
 
 def test_extract_api_chat():
     line = b'{"message":{"role":"assistant","content":"Hello"},"done":false}'
-    assert extract_text_from_ndjson(line, "/api/chat") == "Hello"
+    assert extract_text_from_ndjson(line, "/api/chat") == ("content", "Hello")
 
 
 def test_extract_api_generate():
     line = b'{"response":" world","done":false}'
-    assert extract_text_from_ndjson(line, "/api/generate") == " world"
+    assert extract_text_from_ndjson(line, "/api/generate") == ("content", " world")
 
 
 def test_extract_v1_chat_completions():
     line = b'{"choices":[{"delta":{"content":"!"}}]}'
-    assert extract_text_from_ndjson(line, "/v1/chat/completions") == "!"
+    assert extract_text_from_ndjson(line, "/v1/chat/completions") == ("content", "!")
 
 
 def test_extract_v1_chat_completions_non_streaming():
     """Non-streaming /v1/chat/completions uses choices[0].message.content"""
     line = b'{"choices":[{"message":{"role":"assistant","content":"Full reply here"},"finish_reason":"stop"}]}'
-    assert extract_text_from_ndjson(line, "/v1/chat/completions") == "Full reply here"
+    assert extract_text_from_ndjson(line, "/v1/chat/completions") == ("content", "Full reply here")
+
+
+def test_extract_api_chat_thinking():
+    """Thinking models: empty content, thinking has text"""
+    line = b'{"message":{"role":"assistant","content":"","thinking":"Let me analyze..."},"done":false}'
+    assert extract_text_from_ndjson(line, "/api/chat") == ("thinking", "Let me analyze...")
+
+
+def test_extract_api_chat_error_response():
+    """Ollama error JSON returns [Error] message"""
+    line = b'{"error":"model \'xxx\' not found"}'
+    assert extract_text_from_ndjson(line, "/api/chat") == ("content", "[Error] model 'xxx' not found")
 
 
 def test_extract_returns_none_for_empty_content():
@@ -64,8 +76,8 @@ async def test_tee_stream_calls_on_done_with_accumulated_text():
         yield b'{"message":{"content":"a"},"done":false}\n'
         yield b'{"message":{"content":"b"},"done":true}\n'
 
-    async def on_done(rid, text):
-        done_result.append((rid, text))
+    async def on_done(rid, full_content, full_thinking):
+        done_result.append((rid, full_content, full_thinking))
 
     it = tee_stream(raw(), "/api/chat", "req1", on_done=on_done)
     async for _ in it:
@@ -74,6 +86,7 @@ async def test_tee_stream_calls_on_done_with_accumulated_text():
     assert len(done_result) == 1
     assert done_result[0][0] == "req1"
     assert done_result[0][1] == "ab"
+    assert done_result[0][2] == ""
 
 
 def test_tee_stream_import():

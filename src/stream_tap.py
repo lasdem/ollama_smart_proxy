@@ -5,34 +5,46 @@ to accumulate response text for logging and optional broadcast.
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Callable, Optional, Union, Awaitable
+from typing import AsyncIterator, Callable, Optional, Tuple, Union, Awaitable
 
 logger = logging.getLogger(__name__)
 
+# Result: ("content", str) or ("thinking", str) or None
+ExtractResult = Optional[Tuple[str, str]]
 
-def extract_text_from_ndjson(line: bytes, path: str) -> Optional[str]:
+
+def extract_text_from_ndjson(line: bytes, path: str) -> ExtractResult:
     """
     Extract displayable text from one NDJSON line based on endpoint path.
-    Returns None if no text in this chunk or parse fails.
+    Returns ("content", text), ("thinking", text), or None.
     """
     try:
         data = json.loads(line.decode("utf-8", errors="replace"))
     except Exception:
         return None
     path_lower = path.strip("/").lower()
-    # /api/chat: message.content
+
+    # Ollama error responses: {"error": "..."}
+    error_msg = data.get("error")
+    if isinstance(error_msg, str) and error_msg:
+        return ("content", f"[Error] {error_msg}")
+
+    # /api/chat: message.content and message.thinking (thinking models)
     if "api/chat" in path_lower:
         msg = data.get("message")
         if isinstance(msg, dict):
             content = msg.get("content")
             if isinstance(content, str) and content:
-                return content
+                return ("content", content)
+            thinking = msg.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                return ("thinking", thinking)
         return None
     # /api/generate: response
     if "api/generate" in path_lower:
         content = data.get("response")
         if isinstance(content, str) and content:
-            return content
+            return ("content", content)
         return None
     # /v1/chat/completions: choices[0].delta.content (streaming) or choices[0].message.content (non-streaming)
     if "v1/chat/completions" in path_lower:
@@ -42,13 +54,13 @@ def extract_text_from_ndjson(line: bytes, path: str) -> Optional[str]:
             if isinstance(delta, dict):
                 content = delta.get("content")
                 if isinstance(content, str) and content:
-                    return content
+                    return ("content", content)
             # Non-streaming: message.content
             message = choices[0].get("message")
             if isinstance(message, dict):
                 content = message.get("content")
                 if isinstance(content, str) and content:
-                    return content
+                    return ("content", content)
         return None
     # /v1/completions: choices[0].text
     if "v1/completions" in path_lower:
@@ -56,7 +68,7 @@ def extract_text_from_ndjson(line: bytes, path: str) -> Optional[str]:
         if isinstance(choices, list) and choices:
             text = choices[0].get("text")
             if isinstance(text, str) and text:
-                return text
+                return ("content", text)
         return None
     return None
 
@@ -65,18 +77,42 @@ async def tee_stream(
     raw_iter: AsyncIterator[bytes],
     path: str,
     request_id: str,
-    on_chunk: Optional[Callable[[str, str], Union[None, Awaitable[None]]]] = None,
-    on_done: Optional[Callable[[str, str], Union[None, Awaitable[None]]]] = None,
+    on_chunk: Optional[Callable[..., Union[None, Awaitable[None]]]] = None,
+    on_done: Optional[Callable[..., Union[None, Awaitable[None]]]] = None,
 ) -> AsyncIterator[bytes]:
     """
     Tee the raw response stream: yield each chunk unchanged to the client,
-    and parse NDJSON lines to accumulate response text. Call on_chunk for each
-    text delta and on_done with full accumulated text at end.
-    on_done can be async; it will be scheduled with create_task so the iterator
-    can finish without awaiting it.
+    and parse NDJSON lines to accumulate response text. Accumulates content and
+    thinking separately. Calls on_chunk(request_id, text) for content deltas only.
+    Calls on_done(request_id, full_content, full_thinking) at end.
+    on_done can be async; it will be scheduled with create_task.
     """
     buffer = b""
-    accumulated: list[str] = []
+    accumulated_content: list[str] = []
+    accumulated_thinking: list[str] = []
+
+    def process_result(res: ExtractResult) -> None:
+        if not res:
+            return
+        kind, text = res
+        if kind == "content":
+            accumulated_content.append(text)
+            if on_chunk:
+                try:
+                    result = on_chunk(request_id, text, kind)
+                    if asyncio.iscoroutine(result):
+                        asyncio.create_task(result)
+                except Exception as e:
+                    logger.warning("stream_tap on_chunk failed: %s", e)
+        elif kind == "thinking":
+            accumulated_thinking.append(text)
+            if on_chunk:
+                try:
+                    result = on_chunk(request_id, text, kind)
+                    if asyncio.iscoroutine(result):
+                        asyncio.create_task(result)
+                except Exception as e:
+                    logger.warning("stream_tap on_chunk failed: %s", e)
 
     try:
         async for chunk in raw_iter:
@@ -92,32 +128,17 @@ async def tee_stream(
                     line = line[6:]
                 if line.strip() == b"[DONE]":
                     continue
-                text = extract_text_from_ndjson(line, path)
-                if text:
-                    accumulated.append(text)
-                    if on_chunk:
-                        try:
-                            result = on_chunk(request_id, text)
-                            if asyncio.iscoroutine(result):
-                                asyncio.create_task(result)
-                        except Exception as e:
-                            logger.warning("stream_tap on_chunk failed: %s", e)
+                res = extract_text_from_ndjson(line, path)
+                process_result(res)
         if buffer.strip():
-            text = extract_text_from_ndjson(buffer, path)
-            if text:
-                accumulated.append(text)
-                if on_chunk:
-                    try:
-                        result = on_chunk(request_id, text)
-                        if asyncio.iscoroutine(result):
-                            asyncio.create_task(result)
-                    except Exception as e:
-                        logger.warning("stream_tap on_chunk failed: %s", e)
+            res = extract_text_from_ndjson(buffer, path)
+            process_result(res)
     finally:
-        full_text = "".join(accumulated)
+        full_content = "".join(accumulated_content)
+        full_thinking = "".join(accumulated_thinking)
         if on_done:
             try:
-                result = on_done(request_id, full_text)
+                result = on_done(request_id, full_content, full_thinking)
                 if asyncio.iscoroutine(result):
                     asyncio.get_running_loop().create_task(result)
             except Exception as e:

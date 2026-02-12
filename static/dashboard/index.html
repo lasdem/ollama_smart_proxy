@@ -44,7 +44,7 @@
         <label>Limit <input type="number" id="limit" value="20" min="1" max="200" /></label>
         <label>Status <input type="text" id="filterStatus" placeholder="e.g. completed" /></label>
         <label>Model <input type="text" id="filterModel" placeholder="partial match" /></label>
-        <label>IP <input type="text" id="filterIp" placeholder="partial match" /></label>
+        <label>IP <input type="text" id="filterIp" placeholder="exact or 10.200.* for partial" /></label>
         <button id="loadHistory">Load</button>
       </div>
       <div class="table-wrap">
@@ -60,6 +60,7 @@
               <th>Queue wait</th>
               <th>Processing</th>
               <th>Session</th>
+              <th>Endpoint</th>
               <th></th>
             </tr>
           </thead>
