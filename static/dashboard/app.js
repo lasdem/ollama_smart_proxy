@@ -100,6 +100,10 @@
           if (row) {
             var streamEl = row.querySelector('.body.streamable');
             if (streamEl) { streamEl.textContent = fullText; }
+            // Keep thread scrolled to bottom when this request is in the open session
+            if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === msg.request_id; })) {
+              scrollThreadToBottom();
+            }
           }
         } else if (msg.type === 'request_completed') {
           delete liveAccumulated[msg.request_id];
@@ -125,6 +129,15 @@
       if (divs[i].getAttribute('data-request-id') === requestId) return divs[i];
     }
     return null;
+  }
+
+  /** Scroll the conversation thread to the bottom so the latest content is visible. */
+  function scrollThreadToBottom() {
+    var container = document.getElementById('threadMessages');
+    var threadPanel = document.getElementById('sessionThread');
+    if (!container || !threadPanel || threadPanel.classList.contains('hidden')) return;
+    var last = container.lastElementChild;
+    if (last) last.scrollIntoView({ block: 'end', behavior: 'auto' });
   }
 
   /* -- Polling -- */
@@ -269,6 +282,7 @@
         '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>';
       container.appendChild(asstDiv);
     });
+    requestAnimationFrame(function () { scrollThreadToBottom(); });
   }
 
   function buildInlineMeta(req) {

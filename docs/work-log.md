@@ -47,6 +47,23 @@ Each entry should include:
 - **Related Files**:
   - `docs/TODO.md`, `docs/changelog/v4.1_MONITORING_WEBUI.md`, `docs/ARCHITECTURE.md`, `static/dashboard/app.js`, `src/smart_proxy.py`, `src/proxy_endpoints.py`
 
+### Note for next session: conversation auto-scroll
+- **Topic:** Dashboard Conversations UX
+- **Issue:** The conversation thread does not scroll to the bottom. When monitoring live conversations, new content appears below the fold and the user has to scroll manually.
+- **Fix for later:** In `static/dashboard/app.js`, scroll the thread container (e.g. `#threadMessages` or its scrollable parent) to the bottom when: (1) opening a thread (`showSessionThread`), (2) when new streaming content is appended (chunk handler or after thread rebuild that includes `liveAccumulated`). See `docs/TODO.md` Future section.
+
+---
+
+## 2026-02-12
+
+### Dashboard conversation thread auto-scroll (implemented)
+- **Topic:** Conversations tab UX — auto-scroll so latest content is visible during live streaming
+- **Summary:**
+  - Added `scrollThreadToBottom()` in `static/dashboard/app.js`: scrolls the last message in `#threadMessages` into view via `scrollIntoView({ block: 'end', behavior: 'auto' })`, only when `#sessionThread` is visible.
+  - Called from (1) end of `showSessionThread` (after building DOM, wrapped in `requestAnimationFrame` so layout is complete), and (2) WebSocket `chunk` handler after updating the streamable assistant body — only when the chunk’s request belongs to the currently open session (`currentSessionRequests`).
+- **Acceptance:** Opening a conversation scrolls to the bottom; with “Go live” on, new assistant text keeps the thread scrolled to the bottom without manual scrolling.
+- **Related Files:** `static/dashboard/app.js`, `docs/TODO.md`, `docs/work-log.md`
+
 ---
 
 ## [Current Date]

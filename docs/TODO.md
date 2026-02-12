@@ -27,3 +27,9 @@ The administrator can see requests and responses from Ollama in a Web UI in real
 ## Future
 
 - [ ] Optional: store full request body for raw JSON view (currently prompt_text + response_text).
+
+---
+
+## Done (moved from Future)
+
+- [x] **Dashboard UX:** Conversation thread auto-scroll (implemented 2026-02-12). Thread scrolls to bottom when opening a thread (`showSessionThread`) and when new content streams in (WebSocket chunk handler). See `scrollThreadToBottom()` in `static/dashboard/app.js`.
