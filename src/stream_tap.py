@@ -34,13 +34,19 @@ def extract_text_from_ndjson(line: bytes, path: str) -> Optional[str]:
         if isinstance(content, str) and content:
             return content
         return None
-    # /v1/chat/completions: choices[0].delta.content
+    # /v1/chat/completions: choices[0].delta.content (streaming) or choices[0].message.content (non-streaming)
     if "v1/chat/completions" in path_lower:
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             delta = choices[0].get("delta")
             if isinstance(delta, dict):
                 content = delta.get("content")
+                if isinstance(content, str) and content:
+                    return content
+            # Non-streaming: message.content
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
                 if isinstance(content, str) and content:
                     return content
         return None

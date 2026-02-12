@@ -296,6 +296,7 @@
       ['Processing', fmtDuration(req.processing_time_seconds)],
       ['Priority', req.priority_score],
       ['Session', req.session_id],
+      ['User-Agent', req.user_agent],
       ['Received', req.timestamp_received],
       ['Started', req.timestamp_started],
       ['Completed', req.timestamp_completed],
@@ -316,9 +317,11 @@
     var limit = document.getElementById('limit').value;
     var status = document.getElementById('filterStatus').value.trim();
     var model = document.getElementById('filterModel').value.trim();
+    var ip = document.getElementById('filterIp').value.trim();
     var url = API_BASE + '/query_db?limit=' + encodeURIComponent(limit);
     if (status) url += '&status=' + encodeURIComponent(status);
     if (model) url += '&model=' + encodeURIComponent(model);
+    if (ip) url += '&ip_address=' + encodeURIComponent(ip);
     fetch(url, { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
@@ -362,6 +365,7 @@
           ['Status', req.status], ['Duration (s)', req.duration_seconds],
           ['Queue wait (s)', req.queue_wait_seconds], ['Processing (s)', req.processing_time_seconds],
           ['Priority score', req.priority_score], ['Session ID', req.session_id],
+          ['Endpoint', req.endpoint], ['User-Agent', req.user_agent],
           ['Received', req.timestamp_received], ['Started', req.timestamp_started],
           ['Completed', req.timestamp_completed], ['Error', req.error_message]
         ].filter(function (r) { return r[1] != null && r[1] !== ''; });

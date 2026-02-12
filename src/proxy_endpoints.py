@@ -258,7 +258,7 @@ async def query_db(
     - offset: Offset for pagination (default: 0)
     - status: Filter by status - comma-separated for multiple (completed, failed, processing, queued)
     - model: Filter by model name (partial match)
-    - ip_address: Filter by IP address (exact match)
+    - ip_address: Filter by IP address (partial match)
     - session_id: Filter by session (conversation) id
     - from_time: Filter requests after this timestamp (ISO format)
     - to_time: Filter requests before this timestamp (ISO format)
@@ -304,7 +304,7 @@ async def query_db(
             query = query.filter(RequestLog.model_name.like(f"%{model}%"))
         
         if ip_address:
-            query = query.filter(RequestLog.source_ip == ip_address)
+            query = query.filter(RequestLog.source_ip.like(f"%{ip_address}%"))
 
         if session_id:
             query = query.filter(RequestLog.session_id == session_id)
@@ -361,7 +361,9 @@ async def query_db(
                 "status": record.status,
                 "error_message": record.error_message,
                 "session_id": record.session_id,
-                "created_at": record.created_at.isoformat() if record.created_at else None
+                "created_at": record.created_at.isoformat() if record.created_at else None,
+                "endpoint": record.endpoint,
+                "user_agent": record.user_agent,
             }
             requests_data.append(record_dict)
         
@@ -419,6 +421,8 @@ async def proxy_request_detail(request: Request, request_id: str):
         "error_message": log.error_message,
         "session_id": log.session_id,
         "created_at": log.created_at.isoformat() if log.created_at else None,
+        "endpoint": log.endpoint,
+        "user_agent": log.user_agent,
     }
 
 

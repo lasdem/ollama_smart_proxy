@@ -317,7 +317,9 @@ async def enqueue_request(request: Request, path: str):
     # Log to DB
     await asyncio.to_thread(
         request_repo.log_request,
-        req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text, session_id=session_id
+        req_id, client_ip, model_name, "queued", 0, priority_score, prompt_text=prompt_text, session_id=session_id,
+        endpoint=path,
+        user_agent=request.headers.get("user-agent"),
     )
     
     async with queue_lock:
@@ -491,6 +493,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     response_text=response_text_val,
                     processing_time_seconds=processing_time,
                     outgoing_conversation_fingerprint=outgoing_fp,
+                    endpoint=request.path,
+                    user_agent=request.raw_request.headers.get("user-agent"),
                 )
                 await broadcaster.request_completed(rid, status)
 

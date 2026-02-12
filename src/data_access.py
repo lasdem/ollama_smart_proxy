@@ -134,10 +134,10 @@ class RequestLogRepository:
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None) -> Optional[RequestLog]:
         """
         Log or update a request
-        
+
         Args:
             request_id: Request ID
             source_ip: Source IP address
@@ -152,6 +152,8 @@ class RequestLogRepository:
             processing_time_seconds: Optional processing time in seconds
             session_id: Optional session id for conversation grouping
             outgoing_conversation_fingerprint: Optional hash of messages+response for matching next request's prefix
+            endpoint: Optional API path e.g. /api/chat, /v1/chat/completions
+            user_agent: Optional User-Agent request header
 
         Returns:
             RequestLog: Request log object or None if not found
@@ -182,6 +184,10 @@ class RequestLogRepository:
                     request_log.session_id = session_id
                 if outgoing_conversation_fingerprint is not None:
                     request_log.outgoing_conversation_fingerprint = outgoing_conversation_fingerprint
+                if endpoint is not None:
+                    request_log.endpoint = endpoint
+                if user_agent is not None:
+                    request_log.user_agent = user_agent
 
                 if status == "completed":
                     request_log.timestamp_completed = datetime.utcnow()
@@ -204,7 +210,9 @@ class RequestLogRepository:
                     processing_time_seconds=processing_time_seconds,
                     session_id=session_id,
                     outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
-                    timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None
+                    timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None,
+                    endpoint=endpoint,
+                    user_agent=user_agent,
                 )
                 session.add(request_log)
             
@@ -225,6 +233,8 @@ class RequestLogRepository:
                 'response_text': response_text,
                 'session_id': session_id,
                 'outgoing_conversation_fingerprint': outgoing_conversation_fingerprint,
+                'endpoint': endpoint,
+                'user_agent': user_agent,
                 'timestamp_received': datetime.utcnow().isoformat() if not timestamp_started else timestamp_started.isoformat(),
                 'timestamp_started': timestamp_started.isoformat() if timestamp_started else None,
                 'timestamp_completed': datetime.utcnow().isoformat() if status in ["completed", "error"] else None,

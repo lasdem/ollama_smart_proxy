@@ -27,6 +27,12 @@ def test_extract_v1_chat_completions():
     assert extract_text_from_ndjson(line, "/v1/chat/completions") == "!"
 
 
+def test_extract_v1_chat_completions_non_streaming():
+    """Non-streaming /v1/chat/completions uses choices[0].message.content"""
+    line = b'{"choices":[{"message":{"role":"assistant","content":"Full reply here"},"finish_reason":"stop"}]}'
+    assert extract_text_from_ndjson(line, "/v1/chat/completions") == "Full reply here"
+
+
 def test_extract_returns_none_for_empty_content():
     line = b'{"message":{"content":""},"done":false}'
     assert extract_text_from_ndjson(line, "/api/chat") is None

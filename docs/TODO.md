@@ -33,3 +33,4 @@ The administrator can see requests and responses from Ollama in a Web UI in real
 ## Done (moved from Future)
 
 - [x] **Dashboard UX:** Conversation thread auto-scroll (implemented 2026-02-12). Thread scrolls to bottom when opening a thread (`showSessionThread`) and when new content streams in (WebSocket chunk handler). See `scrollThreadToBottom()` in `static/dashboard/app.js`.
+- [x] **Dashboard metadata and filters (2026-02-12):** Endpoint and User-Agent stored per request; shown in detail modal (User-Agent also in thread inline meta). Non-streaming `/v1/chat/completions` response extraction fixed. History renamed to Request History; IP filter (partial match) added.

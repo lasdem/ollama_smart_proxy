@@ -19,7 +19,7 @@
   </header>
   <nav class="tabs">
     <button data-tab="conversations">Conversations</button>
-    <button data-tab="history">History</button>
+    <button data-tab="history">Request History</button>
   </nav>
   <main>
     <section id="conversations" class="tab-panel">
@@ -44,6 +44,7 @@
         <label>Limit <input type="number" id="limit" value="20" min="1" max="200" /></label>
         <label>Status <input type="text" id="filterStatus" placeholder="e.g. completed" /></label>
         <label>Model <input type="text" id="filterModel" placeholder="partial match" /></label>
+        <label>IP <input type="text" id="filterIp" placeholder="partial match" /></label>
         <button id="loadHistory">Load</button>
       </div>
       <div class="table-wrap">

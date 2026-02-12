@@ -10,7 +10,7 @@ import fcntl
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, func, inspect as sa_inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.sql import text
@@ -61,6 +61,8 @@ class RequestLog(Base):
     session_id = Column(String(255), nullable=True, index=True)  # content-based conversation grouping
     outgoing_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of messages+response for session matching
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    endpoint = Column(String(255), nullable=True)  # e.g. /api/chat, /v1/chat/completions
+    user_agent = Column(String(512), nullable=True)  # From request header User-Agent
 
     def __repr__(self):
         return f"<RequestLog {self.request_id} - {self.status}>"
@@ -164,12 +166,32 @@ class DatabaseConnection:
             
             # Create tables if they don't exist
             Base.metadata.create_all(bind=self.engine)
-            
+            # Add new columns to existing tables if missing (lightweight migration)
+            self._add_missing_columns()
             logger.info("Database connection initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize database connection: {e}")
             raise
+
+    def _add_missing_columns(self):
+        """Add endpoint and user_agent columns to request_logs if they don't exist."""
+        try:
+            inspector = sa_inspect(self.engine)
+            if "request_logs" not in inspector.get_table_names():
+                return
+            existing = {c["name"] for c in inspector.get_columns("request_logs")}
+            with self.engine.connect() as conn:
+                if "endpoint" not in existing:
+                    conn.execute(text("ALTER TABLE request_logs ADD COLUMN endpoint VARCHAR(255)"))
+                    conn.commit()
+                    logger.info("Added column request_logs.endpoint")
+                if "user_agent" not in existing:
+                    conn.execute(text("ALTER TABLE request_logs ADD COLUMN user_agent VARCHAR(512)"))
+                    conn.commit()
+                    logger.info("Added column request_logs.user_agent")
+        except Exception as e:
+            logger.warning("Migration add columns failed (may already exist): %s", e)
     
     def get_session(self):
         """Get database session"""

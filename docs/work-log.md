@@ -64,6 +64,14 @@ Each entry should include:
 - **Acceptance:** Opening a conversation scrolls to the bottom; with “Go live” on, new assistant text keeps the thread scrolled to the bottom without manual scrolling.
 - **Related Files:** `static/dashboard/app.js`, `docs/TODO.md`, `docs/work-log.md`
 
+### Dashboard endpoint, User-Agent, [HTTP 200] fix, Request History filters
+- **Topic:** Dashboard metadata, response extraction, and Request History UX
+- **Summary:**
+  - Added `endpoint` and `user_agent` columns to RequestLog with lightweight migration in `database.py`; threaded through `log_request()` and both call sites in `smart_proxy.py` (enqueue and on_stream_done). API returns them in query_db and request detail. Endpoint shown only in detail modal; User-Agent in thread inline meta and detail modal.
+  - Fixed `[HTTP 200]` for non-streaming `/v1/chat/completions`: `extract_text_from_ndjson` in `stream_tap.py` now also checks `choices[0].message.content` when `delta` is absent.
+  - Renamed History tab to Request History; IP filter in query_db changed to partial match (LIKE); added IP filter input in Request History UI.
+- **Related Files:** `src/database.py`, `src/data_access.py`, `src/smart_proxy.py`, `src/proxy_endpoints.py`, `src/stream_tap.py`, `static/dashboard/index.html`, `static/dashboard/app.js`, `tests/test_stream_tap.py`, `docs/TODO.md`, `docs/work-log.md`
+
 ---
 
 ## [Current Date]
