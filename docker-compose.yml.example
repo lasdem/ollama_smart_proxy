@@ -1,7 +1,5 @@
-version: '3.8'
-
 services:
-  smart-proxy:
+  ollama-smart-proxy:
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,12 +8,12 @@ services:
       - "${PROXY_PORT:-8003}:8003"
     environment:
       # Ollama Configuration
-      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://localhost:11434}
       - OLLAMA_MAX_PARALLEL=${OLLAMA_MAX_PARALLEL:-3}
       
       # Proxy Configuration
-      - PROXY_HOST=0.0.0.0
-      - PROXY_PORT=8003
+      - PROXY_HOST=${PROXY_HOST:-0.0.0.0}
+      - PROXY_PORT=${PROXY_PORT:-8003}
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
       
       # VRAM Configuration
@@ -27,18 +25,18 @@ services:
       - PRIORITY_BASE_PARALLEL=${PRIORITY_BASE_PARALLEL:-150}
       - PRIORITY_BASE_SMALL_SWAP=${PRIORITY_BASE_SMALL_SWAP:-300}
       - PRIORITY_BASE_LARGE_SWAP=${PRIORITY_BASE_LARGE_SWAP:-500}
-      - PRIORITY_WAIT_TIME_MULTIPLIER=${PRIORITY_WAIT_TIME_MULTIPLIER:--1}
+      - PRIORITY_WAIT_TIME_MULTIPLIER=${PRIORITY_WAIT_TIME_MULTIPLIER:- -1}
       - PRIORITY_RATE_LIMIT_MULTIPLIER=${PRIORITY_RATE_LIMIT_MULTIPLIER:-5}
       - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-600}
       
       # Logging Configuration
-      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_FORMAT=${LOG_FORMAT:-human}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - ACCESS_LOG_LEVEL=${ACCESS_LOG_LEVEL:-WARNING}
       
       # Database Configuration
       - DB_TYPE=${DB_TYPE:-sqlite}
-      - SQLITE_DB_PATH=/app/db/smart_proxy.db
+      - SQLITE_DB_PATH=${SQLITE_DB_PATH:-./db/smart_proxy.db}
     volumes:
       # Persist database and logs
       - ./db:/app/db
@@ -49,9 +47,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - ollama-network
-
-networks:
-  ollama-network:
-    driver: bridge
