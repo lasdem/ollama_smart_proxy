@@ -23,6 +23,7 @@ build/
 .env
 .venv
 venv/
+docker-compose.yml
 gitlab-config.json
 
 # IDE
