@@ -6,8 +6,8 @@
   /* ---------- Auth helpers ---------- */
   function getKey() {
     var params = new URLSearchParams(window.location.search);
-    var key = params.get('key') || sessionStorage.getItem('proxy_admin_key') || '';
-    if (key) sessionStorage.setItem('proxy_admin_key', key);
+    var key = params.get('key') || localStorage.getItem('proxy_admin_key') || '';
+    if (key) localStorage.setItem('proxy_admin_key', key);
     return key;
   }
   function apiHeaders() {
@@ -24,7 +24,7 @@
   document.getElementById('adminKey').value = getKey();
   document.getElementById('setKey').addEventListener('click', function () {
     var key = document.getElementById('adminKey').value.trim();
-    if (key) { sessionStorage.setItem('proxy_admin_key', key); setAuthStatus(true, 'Key set'); }
+    if (key) { localStorage.setItem('proxy_admin_key', key); setAuthStatus(true, 'Key set'); }
   });
   setAuthStatus(!!getKey());
 
