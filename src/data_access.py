@@ -447,17 +447,19 @@ class AnalyticsRepository:
         """
         return self.analytics.get_token_usage_stats(start_time, end_time)
     
-    def get_requests_over_time(self, interval: str = 'hour') -> List[Dict[str, Any]]:
+    def get_requests_over_time(self, interval: str = 'hour', start_time: datetime = None, end_time: datetime = None) -> List[Dict[str, Any]]:
         """
         Get request count over time
         
         Args:
             interval: Time interval ('hour', 'day', 'week')
+            start_time: Start time for query
+            end_time: End time for query
             
         Returns:
             List[Dict]: Request count over time
         """
-        return self.analytics.get_requests_over_time(interval)
+        return self.analytics.get_requests_over_time(interval, start_time, end_time)
     
     def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
