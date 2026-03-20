@@ -59,6 +59,9 @@
       btn.classList.add('active');
       var panel = document.getElementById(tab);
       if (panel) panel.classList.remove('hidden');
+      // Auto-refresh data when switching tabs
+      if (tab === 'home' && getKey()) loadHome();
+      if (tab === 'conversations' && getKey()) loadSessions();
     });
   });
   document.querySelector('.tabs button[data-tab="home"]').classList.add('active');
@@ -71,7 +74,7 @@
      ================================================================ */
   var HOME_DISPLAY_LIMIT = 10;
   var HOME_RECENT_LIMIT = 5;
-  var DEBOUNCE_MS = 500;
+  var DEBOUNCE_MS = 150;
   var homeDebounceTimer = null;
   var sessionsDebounceTimer = null;
   function debouncedLoadHome() {
@@ -341,11 +344,14 @@
         if (msg.type === 'request_started') {
           var sid = msg.metadata && msg.metadata.session_id;
           if (sid && !currentSessionRequests) pendingLiveOpen = sid;
-          debouncedLoadSessions();
+          // Only fetch sessions list if we're not already viewing a thread for this session
+          var viewingSid = currentSessionRequests && currentSessionRequests._sid;
+          if (!viewingSid || viewingSid !== sid) {
+            debouncedLoadSessions();
+          }
         } else if (msg.type === 'request_completed') {
-          delete liveAccumulated[msg.request_id];
-          delete liveThinkingAccumulated[msg.request_id];
-          debouncedLoadSessions();
+          // Finalize live text into completed state, then refresh
+          finalizeCompletedRequest(msg.request_id);
         } else if (msg.type === 'chunk' && liveMode) {
           var kind = msg.kind || 'content';
           var fullText = msg.full !== undefined ? msg.full : ((liveAccumulated[msg.request_id] || '') + (msg.delta || ''));
@@ -441,6 +447,72 @@
     historyLimitEl.addEventListener('change', function () { localStorage.setItem('proxy_history_limit', this.value); });
   }
 
+  /** Check if any request in the current thread is actively streaming live chunks. */
+  function hasActiveStreaming() {
+    if (!currentSessionRequests) return false;
+    for (var i = 0; i < currentSessionRequests.length; i++) {
+      if (liveAccumulated[currentSessionRequests[i].request_id]) return true;
+    }
+    return false;
+  }
+
+  /** After request_completed, fetch that single request's final data and update the thread in-place. */
+  function finalizeCompletedRequest(requestId) {
+    var finalText = liveAccumulated[requestId] || '';
+    var finalThinking = liveThinkingAccumulated[requestId] || '';
+    delete liveAccumulated[requestId];
+    delete liveThinkingAccumulated[requestId];
+    // Update the DOM in-place: swap streaming indicator for final state
+    var row = findAssistantDiv(requestId);
+    if (row) {
+      row.classList.remove('thread-msg-live');
+      var indicator = row.querySelector('.streaming-indicator');
+      if (indicator) indicator.textContent = 'done';
+      var streamEl = row.querySelector('.body.streamable');
+      if (streamEl && finalText) {
+        streamEl.className = 'body markdown-body';
+        streamEl.innerHTML = renderMarkdown(finalText);
+      }
+    }
+    // Fetch the final DB record to get accurate metadata (duration, status, etc.)
+    var key = getKey();
+    if (key) {
+      fetch(API_BASE + '/requests/' + encodeURIComponent(requestId), { headers: apiHeaders() })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (req) {
+          if (!req) return;
+          // Update currentSessionRequests entry in-place
+          if (currentSessionRequests) {
+            for (var i = 0; i < currentSessionRequests.length; i++) {
+              if (currentSessionRequests[i].request_id === requestId) {
+                currentSessionRequests[i] = req;
+                break;
+              }
+            }
+          }
+          // Update the assistant row with final metadata
+          var row2 = findAssistantDiv(requestId);
+          if (row2) {
+            var roleEl = row2.querySelector('.role');
+            if (roleEl) {
+              roleEl.innerHTML = 'Assistant · ' + escapeHtml(req.model || '') + ' · ' + fmtDurationShort(req.duration_seconds);
+            }
+            // If DB has response_text and we didn't have live text, render it
+            if (req.response_text && !finalText) {
+              var bodyEl = row2.querySelector('.body');
+              if (bodyEl) {
+                bodyEl.className = 'body markdown-body';
+                bodyEl.innerHTML = renderMarkdown(req.response_text);
+              }
+            }
+          }
+        })
+        .catch(function () {});
+    }
+    // Also refresh session list (to update badges/status) — but don't rebuild the thread
+    debouncedLoadSessions();
+  }
+
   function findAssistantDiv(requestId) {
     var divs = document.querySelectorAll('#threadMessages .thread-msg[data-request-id]');
     for (var i = 0; i < divs.length; i++) {
@@ -517,8 +589,9 @@
           listEl.appendChild(item);
         });
 
-        // If we're viewing a thread, refresh it
-        if (currentSessionRequests && bySession[currentSessionRequests._sid]) {
+        // If we're viewing a thread, refresh it — but NOT while actively streaming
+        // (streaming content lives in liveAccumulated and would be clobbered by stale DB data)
+        if (currentSessionRequests && bySession[currentSessionRequests._sid] && !hasActiveStreaming()) {
           showSessionThread(currentSessionRequests._sid, bySession[currentSessionRequests._sid]);
         }
 

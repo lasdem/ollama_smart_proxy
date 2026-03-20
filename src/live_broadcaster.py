@@ -129,15 +129,21 @@ class LiveBroadcaster:
         })
 
     async def _broadcast(self, payload: Dict[str, Any]) -> None:
+        async with self._lock:
+            targets = list(self._connections)
+        if not targets:
+            return
+        results = await asyncio.gather(
+            *(ws.send_json(payload) for ws in targets),
+            return_exceptions=True,
+        )
         dead = set()
-        for ws in self._connections:
-            try:
-                await ws.send_json(payload)
-            except Exception:
+        for ws, result in zip(targets, results):
+            if isinstance(result, Exception):
                 dead.add(ws)
-        for ws in dead:
+        if dead:
             async with self._lock:
-                self._connections.discard(ws)
+                self._connections -= dead
 
     def get_active_request_ids(self) -> list:
         return list(self._active.keys())
