@@ -150,3 +150,12 @@ td a:hover { text-decoration: underline; }
 .detail-tabs button { padding: 0.35rem 0.75rem; margin-right: 0.5rem; background: #333; border: none; color: #ccc; border-radius: 4px; cursor: pointer; }
 .detail-tabs button.active { background: #0af; color: #000; }
 .detail-body { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; margin: 0; max-height: 60vh; overflow: auto; background: #1a1a1a; padding: 1rem; border-radius: 4px; }
+
+/* Admin tab */
+.admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+@media (max-width: 700px) { .admin-grid { grid-template-columns: 1fr; } }
+.admin-btn { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+.admin-btn:hover { filter: brightness(1.15); }
+.admin-btn-danger { background: #c44; color: #fff; }
+.admin-btn-danger:hover { filter: brightness(1.15); }
+.conv-ws-indicator { font-size: 0.85rem; color: #888; }

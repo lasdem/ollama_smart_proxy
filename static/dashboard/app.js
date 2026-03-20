@@ -17,13 +17,19 @@
     return h;
   }
   function setAuthStatus(ok, msg) {
+    var text = msg || (ok ? 'Key set' : 'Set key for API');
+    var color = ok ? '#0a7' : '#888';
     var el = document.getElementById('authStatus');
-    el.textContent = msg || (ok ? 'Key set' : 'Set key for API');
-    el.style.color = ok ? '#0a7' : '#888';
+    if (el) { el.textContent = text; el.style.color = color; }
+    var el2 = document.getElementById('adminAuthStatus');
+    if (el2) { el2.textContent = text; el2.style.color = color; }
   }
-  document.getElementById('adminKey').value = getKey();
-  document.getElementById('setKey').addEventListener('click', function () {
-    var key = document.getElementById('adminKey').value.trim();
+  var adminKeyEl = document.getElementById('adminKey');
+  if (adminKeyEl) adminKeyEl.value = getKey();
+  var setKeyBtn = document.getElementById('setKey');
+  if (setKeyBtn) setKeyBtn.addEventListener('click', function () {
+    var inp = document.getElementById('adminKey');
+    var key = inp ? inp.value.trim() : '';
     if (key) { localStorage.setItem('proxy_admin_key', key); setAuthStatus(true, 'Key set'); }
   });
   setAuthStatus(!!getKey());
@@ -58,6 +64,7 @@
   document.querySelector('.tabs button[data-tab="home"]').classList.add('active');
   document.getElementById('conversations').classList.add('hidden');
   document.getElementById('history').classList.add('hidden');
+  document.getElementById('admin').classList.add('hidden');
 
   /* ================================================================
      HOME (dashboard overview)
@@ -290,6 +297,7 @@
   var ws = null;
   var wsStatusEl = document.getElementById('wsStatus');
   var homeWsStatusEl = document.getElementById('homeWsStatus');
+  var convWsIndicator = document.getElementById('convWsIndicator');
   var liveMode = false; // true when user clicked "Go live" (chunk streaming into threads)
   var liveAccumulated = {};
   var liveThinkingAccumulated = {};
@@ -301,6 +309,7 @@
   function setWsStatus(text, color) {
     if (wsStatusEl) { wsStatusEl.textContent = text; wsStatusEl.style.color = color || ''; }
     if (homeWsStatusEl) { homeWsStatusEl.textContent = text; homeWsStatusEl.style.color = color || ''; }
+    if (convWsIndicator) { convWsIndicator.textContent = text ? ('\u25CF ' + text) : ''; convWsIndicator.style.color = color || ''; }
   }
 
   function buildLiveWsUrl() {
@@ -343,20 +352,10 @@
           var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
           liveAccumulated[msg.request_id] = fullText;
           liveThinkingAccumulated[msg.request_id] = fullThinking;
-          var row = findAssistantDiv(msg.request_id);
-          if (row) {
-            if (kind === 'thinking') {
-              var thinkingPre = row.querySelector('.thread-thinking .streamable-thinking');
-              if (thinkingPre) thinkingPre.textContent = fullThinking;
-              var thinkingDetails = row.querySelector('.thread-thinking');
-              if (thinkingDetails) thinkingDetails.setAttribute('open', 'open');
-            } else {
-              var streamEl = row.querySelector('.body.streamable');
-              if (streamEl) streamEl.textContent = fullText;
-              var thinkingDetails = row.querySelector('.thread-thinking');
-              if (thinkingDetails) thinkingDetails.removeAttribute('open');
-            }
-            if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === msg.request_id; })) scrollThreadToBottom();
+          // Batch DOM updates via requestAnimationFrame
+          pendingChunks[msg.request_id] = { kind: kind, fullText: fullText, fullThinking: fullThinking };
+          if (!chunkRAF) {
+            chunkRAF = requestAnimationFrame(flushChunkUpdates);
           }
         }
       } catch (_) {}
@@ -392,17 +391,54 @@
 
   if (getKey()) connectLiveWs();
 
+  /* ---------- RAF chunk batching ---------- */
+  var pendingChunks = {};
+  var chunkRAF = null;
+  function flushChunkUpdates() {
+    chunkRAF = null;
+    var needScroll = false;
+    var ids = Object.keys(pendingChunks);
+    for (var i = 0; i < ids.length; i++) {
+      var rid = ids[i];
+      var info = pendingChunks[rid];
+      var row = findAssistantDiv(rid);
+      if (row) {
+        if (info.kind === 'thinking') {
+          var thinkingPre = row.querySelector('.thread-thinking .streamable-thinking');
+          if (thinkingPre) thinkingPre.textContent = info.fullThinking;
+          var thinkingDetails = row.querySelector('.thread-thinking');
+          if (thinkingDetails) thinkingDetails.setAttribute('open', 'open');
+        } else {
+          var streamEl = row.querySelector('.body.streamable');
+          if (streamEl) streamEl.textContent = info.fullText;
+          var thinkingDetails = row.querySelector('.thread-thinking');
+          if (thinkingDetails) thinkingDetails.removeAttribute('open');
+        }
+        if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === rid; })) needScroll = true;
+      }
+    }
+    pendingChunks = {};
+    if (needScroll) scrollThreadToBottom();
+  }
+
+  /* ---------- Persist user settings (localStorage) ---------- */
+  var homeHoursEl = document.getElementById('homeHours');
+  if (homeHoursEl) {
+    var savedHomeHours = localStorage.getItem('proxy_home_hours');
+    if (savedHomeHours !== null) homeHoursEl.value = savedHomeHours;
+    homeHoursEl.addEventListener('change', function () { localStorage.setItem('proxy_home_hours', this.value); });
+  }
   var convLimitEl = document.getElementById('convLimit');
   if (convLimitEl) {
-    var savedConvLimit = sessionStorage.getItem('conv_limit');
+    var savedConvLimit = localStorage.getItem('proxy_conv_limit');
     if (savedConvLimit !== null) convLimitEl.value = savedConvLimit;
-    convLimitEl.addEventListener('change', function () { sessionStorage.setItem('conv_limit', this.value); });
+    convLimitEl.addEventListener('change', function () { localStorage.setItem('proxy_conv_limit', this.value); });
   }
   var historyLimitEl = document.getElementById('limit');
   if (historyLimitEl) {
-    var savedHistoryLimit = sessionStorage.getItem('history_limit');
+    var savedHistoryLimit = localStorage.getItem('proxy_history_limit');
     if (savedHistoryLimit !== null) historyLimitEl.value = savedHistoryLimit;
-    historyLimitEl.addEventListener('change', function () { sessionStorage.setItem('history_limit', this.value); });
+    historyLimitEl.addEventListener('change', function () { localStorage.setItem('proxy_history_limit', this.value); });
   }
 
   function findAssistantDiv(requestId) {
@@ -713,4 +749,30 @@
 
   /* Auto-load sessions on start if key is set */
   if (getKey()) { loadSessions(); }
+
+  /* ================================================================
+     ADMIN PANEL — button handlers
+     ================================================================ */
+  function showAdminResult(data) {
+    var el = document.getElementById('adminResult');
+    if (!el) return;
+    el.style.display = 'block';
+    el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  }
+  function adminPost(url, body) {
+    return fetch(url, { method: 'POST', headers: apiHeaders(), body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (data) { showAdminResult(data); })
+      .catch(function (e) { showAdminResult('Error: ' + e.message); });
+  }
+  var pauseBtn = document.getElementById('adminPause');
+  if (pauseBtn) pauseBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { pause: true }); });
+  var resumeBtn = document.getElementById('adminResume');
+  if (resumeBtn) resumeBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { pause: false }); });
+  var clearStaleBtn = document.getElementById('adminClearStale');
+  if (clearStaleBtn) clearStaleBtn.addEventListener('click', function () { adminPost(API_BASE + '/clear-stale'); });
+  var dbDownBtn = document.getElementById('adminDbDown');
+  if (dbDownBtn) dbDownBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { db_available: false }); });
+  var dbRestoreBtn = document.getElementById('adminDbRestore');
+  if (dbRestoreBtn) dbRestoreBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { db_available: true }); });
 })();

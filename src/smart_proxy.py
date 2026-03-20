@@ -376,6 +376,16 @@ async def enqueue_request(request: Request, path: str):
             tracker.cancel_queued_request(client_ip)
         else:
             tracker.remove_request(client_ip, model_name)
+        # Log timeout to DB as error
+        total_duration = time.time() - queued_req.timestamp
+        await asyncio.to_thread(
+            request_repo.log_request,
+            req_id, client_ip, model_name, "error", total_duration, priority_score,
+            response_text=f"[Timeout] Request timed out after {int(total_duration)}s (was_in_queue={was_in_queue})",
+            endpoint=path,
+            user_agent=request.headers.get("user-agent"),
+        )
+        stats["failed_requests"] += 1
         # Ensure broadcaster is cleaned up
         _broadcaster = get_broadcaster()
         await _broadcaster.request_completed(req_id, "timeout")

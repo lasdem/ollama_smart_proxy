@@ -11,16 +11,13 @@
 <body>
   <header class="header">
     <h1>Proxy Monitor</h1>
-    <div class="auth">
-      <input type="password" id="adminKey" placeholder="Admin key (or use ?key= in URL)" />
-      <button id="setKey">Set key</button>
-      <span id="authStatus"></span>
-    </div>
+    <span id="authStatus"></span>
   </header>
   <nav class="tabs">
     <button data-tab="home">Home</button>
     <button data-tab="conversations">Conversations</button>
     <button data-tab="history">Request History</button>
+    <button data-tab="admin">Admin</button>
   </nav>
   <main>
     <section id="home" class="tab-panel">
@@ -83,11 +80,7 @@
       <div class="conv-controls">
         <button id="loadSessions">Refresh</button>
         <label>Limit <input type="number" id="convLimit" value="100" min="1" max="1000" /></label>
-        <span class="conv-live-controls">
-          <button id="connectWs">Go live</button>
-          <button id="disconnectWs" class="hidden">Stop live</button>
-          <span id="wsStatus"></span>
-        </span>
+        <span id="convWsIndicator" class="conv-ws-indicator"></span>
       </div>
       <div id="sessionList" class="session-list"></div>
       <div id="sessionThread" class="session-thread hidden">
@@ -124,6 +117,50 @@
           <tbody></tbody>
         </table>
       </div>
+    </section>
+    <section id="admin" class="tab-panel hidden">
+      <div class="admin-grid">
+        <div class="dash-card">
+          <div class="dash-card-title">Authentication</div>
+          <div class="dash-card-body">
+            <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+              <input type="password" id="adminKey" placeholder="Admin key (or use ?key= in URL)" style="flex:1;min-width:10rem;padding:0.35rem 0.5rem;background:#333;border:1px solid #444;color:#eee;border-radius:4px" />
+              <button id="setKey" class="admin-btn">Set key</button>
+              <span id="adminAuthStatus" style="font-size:0.85rem;color:#888"></span>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-title">Live Streaming</div>
+          <div class="dash-card-body">
+            <div style="display:flex;gap:0.5rem;align-items:center">
+              <button id="connectWs" class="admin-btn">Go live</button>
+              <button id="disconnectWs" class="admin-btn admin-btn-danger hidden">Stop live</button>
+              <span id="wsStatus" style="font-size:0.85rem"></span>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-title">Queue Control</div>
+          <div class="dash-card-body">
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+              <button id="adminPause" class="admin-btn">Pause Queue</button>
+              <button id="adminResume" class="admin-btn">Resume Queue</button>
+              <button id="adminClearStale" class="admin-btn admin-btn-danger">Clear Stale</button>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-title">Debug / Testing</div>
+          <div class="dash-card-body">
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+              <button id="adminDbDown" class="admin-btn admin-btn-danger">Simulate DB Down</button>
+              <button id="adminDbRestore" class="admin-btn">Restore DB</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <pre id="adminResult" style="margin-top:1rem;padding:0.75rem;background:#1a1a1a;border-radius:4px;font-size:0.85rem;max-height:20rem;overflow:auto;color:#ccc;display:none"></pre>
     </section>
   </main>
   <div id="detailModal" class="modal hidden">
