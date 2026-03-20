@@ -3,7 +3,7 @@
 ---
 
 ## Done
-- [x] 
+- [x] v4.2: Stale request handling & analytics performance (see changelog/v4.2_STALE_REQUEST_FIXES.md)
 
 ---
 

@@ -13,9 +13,13 @@ from pydantic import BaseModel
 from database import get_db, RequestLog
 from data_access import get_analytics_repo, get_request_log_repo
 
+import os
 import logging
 logger = logging.getLogger(__name__)
 
+# Analytics response cache: { (hours, group_by, limit): (result_dict, timestamp) }
+_analytics_cache: dict = {}
+ANALYTICS_CACHE_TTL = int(os.getenv("ANALYTICS_CACHE_TTL", "60"))  # seconds
 # Dashboard static files: project root / static / dashboard
 _DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "static" / "dashboard"
 
@@ -301,7 +305,12 @@ async def query_db(
             query = query.filter(RequestLog.status.in_(statuses))
         
         if model:
-            query = query.filter(RequestLog.model_name.like(f"%{model}%"))
+            # Prefix match to allow index usage (use * for wildcard if needed)
+            if "*" in model:
+                pattern = model.replace("*", "%")
+                query = query.filter(RequestLog.model_name.like(pattern))
+            else:
+                query = query.filter(RequestLog.model_name.like(f"{model}%"))
         
         if ip_address:
             if "*" in ip_address:
@@ -461,6 +470,14 @@ async def proxy_analytics(
     """
     _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
     
+    # Check cache
+    cache_key = (hours, group_by, limit)
+    now = time.time()
+    if cache_key in _analytics_cache:
+        cached_result, cached_at = _analytics_cache[cache_key]
+        if now - cached_at < ANALYTICS_CACHE_TTL:
+            return cached_result
+
     analytics_repo = get_analytics_repo()
     
     end_time = datetime.utcnow()
@@ -482,9 +499,10 @@ async def proxy_analytics(
             "perf_by_model": analytics_repo.get_performance_stats(start_time, end_time, group_by='model_name'),
             "perf_by_ip": analytics_repo.get_performance_stats(start_time, end_time, group_by='ip'),
             "model_bunching_detection": analytics_repo.get_model_bunching_detection(start_time, end_time, time_window_seconds=60),
-            "requests_over_time": analytics_repo.get_requests_over_time(interval='hour')
+            "requests_over_time": analytics_repo.get_requests_over_time(interval='hour', start_time=start_time, end_time=end_time)
         }
         
+        _analytics_cache[cache_key] = (analytics_data, time.time())
         return analytics_data
     except Exception as e:
         logger.error(f"Failed to retrieve analytics: {e}")
@@ -555,4 +573,50 @@ async def proxy_login(payload: AuthPayload, request: Request):
         "status": "authenticated",
         "ip": client_ip,
         "expires_at": datetime.fromtimestamp(expiration).isoformat()
+    }
+
+
+@router.post("/clear-stale")
+async def clear_stale_requests(request: Request):
+    """
+    POST /proxy/clear-stale
+    Force-clear all stale/orphaned requests from queue and active_requests.
+    Admin-only endpoint for manual triage of stuck items.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+
+    now = time.time()
+    removed_queued = 0
+    removed_active = 0
+    from live_broadcaster import get_broadcaster
+    broadcaster = get_broadcaster()
+
+    async with _queue_lock:
+        # Remove queued entries with done futures
+        to_remove = []
+        for i, req in enumerate(_request_queue):
+            if req.future.done():
+                to_remove.append(i)
+        for i in reversed(to_remove):
+            req = _request_queue.pop(i)
+            _tracker.cancel_queued_request(req.ip)
+            removed_queued += 1
+
+        # Remove active entries where future is done (already timed out client-side)
+        stale_active = []
+        for rid, req in list(_active_requests.items()):
+            if req.future.done():
+                stale_active.append(req)
+                del _active_requests[rid]
+
+    for req in stale_active:
+        _tracker.remove_request(req.ip, req.model_name)
+        await broadcaster.request_completed(req.request_id, "cleared")
+        removed_active += 1
+
+    return {
+        "cleared_queued": removed_queued,
+        "cleared_active": removed_active,
+        "remaining_queue": len(_request_queue),
+        "remaining_active": len(_active_requests),
     }

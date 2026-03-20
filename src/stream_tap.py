@@ -79,6 +79,7 @@ async def tee_stream(
     request_id: str,
     on_chunk: Optional[Callable[..., Union[None, Awaitable[None]]]] = None,
     on_done: Optional[Callable[..., Union[None, Awaitable[None]]]] = None,
+    chunk_timeout: Optional[float] = None,
 ) -> AsyncIterator[bytes]:
     """
     Tee the raw response stream: yield each chunk unchanged to the client,
@@ -86,6 +87,9 @@ async def tee_stream(
     thinking separately. Calls on_chunk(request_id, text) for content deltas only.
     Calls on_done(request_id, full_content, full_thinking) at end.
     on_done can be async; it will be scheduled with create_task.
+
+    If chunk_timeout is set, raises asyncio.TimeoutError if no chunk arrives
+    within the given number of seconds (detects stalled streams).
     """
     buffer = b""
     accumulated_content: list[str] = []
@@ -115,7 +119,15 @@ async def tee_stream(
                     logger.warning("stream_tap on_chunk failed: %s", e)
 
     try:
-        async for chunk in raw_iter:
+        ait = raw_iter.__aiter__()
+        while True:
+            try:
+                if chunk_timeout and chunk_timeout > 0:
+                    chunk = await asyncio.wait_for(ait.__anext__(), timeout=chunk_timeout)
+                else:
+                    chunk = await ait.__anext__()
+            except StopAsyncIteration:
+                break
             yield chunk
             buffer += chunk
             while b"\n" in buffer:

@@ -8,9 +8,9 @@ import logging
 import json
 import fcntl
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, func, inspect as sa_inspect
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, func, inspect as sa_inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.sql import text
@@ -65,6 +65,11 @@ class RequestLog(Base):
     user_agent = Column(String(512), nullable=True)  # From request header User-Agent
     thinking_text = Column(Text, nullable=True)  # Reasoning/thinking trace from thinking models
     request_body = Column(Text, nullable=True)  # Full request body (JSON string), truncated to ~64KB
+
+    __table_args__ = (
+        Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
+        Index('ix_timestamp_model', 'timestamp_received', 'model_name'),
+    )
 
     def __repr__(self):
         return f"<RequestLog {self.request_id} - {self.status}>"
@@ -200,6 +205,16 @@ class DatabaseConnection:
                     conn.execute(text("ALTER TABLE request_logs ADD COLUMN request_body TEXT"))
                     conn.commit()
                     logger.info("Added column request_logs.request_body")
+                # Add composite indexes if missing
+                existing_indexes = {idx["name"] for idx in inspector.get_indexes("request_logs")}
+                if "ix_ip_outgoing_fp" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ip_outgoing_fp ON request_logs (source_ip, outgoing_conversation_fingerprint)"))
+                    conn.commit()
+                    logger.info("Added composite index ix_ip_outgoing_fp")
+                if "ix_timestamp_model" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_timestamp_model ON request_logs (timestamp_received, model_name)"))
+                    conn.commit()
+                    logger.info("Added composite index ix_timestamp_model")
         except Exception as e:
             logger.warning("Migration add columns failed (may already exist): %s", e)
     
@@ -305,24 +320,44 @@ class DatabaseConnection:
                     files_to_delete.append(file_path)
                     continue
                 
-                session = self.get_session()
-                
+                # Collect all request_ids from this file for a single bulk check
+                parsed_records = []
                 for line in lines:
                     try:
                         record = json.loads(line.strip())
-                        
-                        # Check if record already exists in database
-                        existing = session.query(RequestLog).filter_by(
-                            request_id=record.get('request_id')
-                        ).first()
-                        
-                        if existing:
-                            logger.debug(f"Record {record.get('request_id')} already exists, skipping")
+                        parsed_records.append(record)
+                    except Exception as e:
+                        logger.error(f"Error parsing line in {file_path}: {e}")
+                        file_had_errors = True
+
+                if not parsed_records:
+                    files_to_delete.append(file_path)
+                    continue
+
+                session = self.get_session()
+
+                # Bulk check for existing request_ids in one query
+                all_rids = [r.get('request_id') for r in parsed_records if r.get('request_id')]
+                existing_rids = set()
+                if all_rids:
+                    # Query in batches of 500 to avoid SQLite variable limit
+                    for batch_start in range(0, len(all_rids), 500):
+                        batch = all_rids[batch_start:batch_start + 500]
+                        rows = session.query(RequestLog.request_id).filter(
+                            RequestLog.request_id.in_(batch)
+                        ).all()
+                        existing_rids.update(r[0] for r in rows)
+
+                for record in parsed_records:
+                    try:
+                        rid = record.get('request_id')
+                        if rid in existing_rids:
+                            logger.debug(f"Record {rid} already exists, skipping")
                             continue
                         
                         # Create new record
                         request_log = RequestLog(
-                            request_id=record.get('request_id'),
+                            request_id=rid,
                             source_ip=record.get('source_ip'),
                             model_name=record.get('model_name'),
                             prompt_text=record.get('prompt_text'),
@@ -418,14 +453,20 @@ class AnalyticsQueryBuilder:
             else:
                 group_col = 'model_name'
 
-            # Use GROUP_CONCAT for SQLite compatibility instead of ARRAY_AGG
+            # Use database-specific string aggregation
+            config = self.db._get_db_config()
+            if config['DB_TYPE'] == 'postgres':
+                agg_expr = "STRING_AGG(CASE WHEN status = 'error' THEN error_message END, '|')"
+            else:
+                agg_expr = "GROUP_CONCAT(CASE WHEN status = 'error' THEN error_message END, '|')"
+
             result = session.execute(text(f"""
                 SELECT 
                     {group_col} as group_key,
                     COUNT(*) as total,
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
                     ROUND(100.0 * SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) / COUNT(*), 2) as error_rate_percent,
-                    GROUP_CONCAT(CASE WHEN status = 'error' THEN error_message END, '|') as error_messages
+                    {agg_expr} as error_messages
                 FROM request_logs
                 WHERE timestamp_received BETWEEN :start_time AND :end_time
                 GROUP BY group_key
@@ -761,12 +802,14 @@ class AnalyticsQueryBuilder:
             "avg_total_tokens": 0
         }
     
-    def get_requests_over_time(self, interval: str = 'hour') -> List[Dict[str, Any]]:
+    def get_requests_over_time(self, interval: str = 'hour', start_time: datetime = None, end_time: datetime = None) -> List[Dict[str, Any]]:
         """
         Get request count over time
         
         Args:
             interval: Time interval ('hour', 'day', 'week')
+            start_time: Start time for query (default: last 7 days)
+            end_time: End time for query (default: now)
             
         Returns:
             List[Dict]: Request count over time
@@ -774,6 +817,11 @@ class AnalyticsQueryBuilder:
         try:
             session = self.db.get_session()
             
+            if end_time is None:
+                end_time = datetime.utcnow()
+            if start_time is None:
+                start_time = end_time - timedelta(days=7)
+
             # Build time grouping based on interval using database-specific function
             time_column = self.db._get_date_trunc_expr(interval)
             
@@ -784,9 +832,13 @@ class AnalyticsQueryBuilder:
                     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
                     SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as error_count
                 FROM request_logs
+                WHERE timestamp_received BETWEEN :start_time AND :end_time
                 GROUP BY time_period
                 ORDER BY time_period
-            """)).fetchall()
+            """), {
+                "start_time": start_time,
+                "end_time": end_time
+            }).fetchall()
             
             return [
                 {

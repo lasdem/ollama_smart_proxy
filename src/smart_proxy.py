@@ -8,7 +8,7 @@ import time
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
@@ -26,7 +26,7 @@ import httpx
 from starlette.background import BackgroundTask
 
 # Database and data access imports
-from database import init_db, get_db
+from database import init_db, get_db, RequestLog
 from data_access import get_request_log_repo, init_repositories
 
 # Import routers
@@ -49,6 +49,10 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "300"))
 TOTAL_VRAM_BYTES = int(os.getenv("TOTAL_VRAM_MB", "80000")) * 1024 * 1024
 OLLAMA_MAX_PARALLEL = int(os.getenv("OLLAMA_MAX_PARALLEL", "3"))
 VRAM_POLL_INTERVAL = int(os.getenv("VRAM_POLL_INTERVAL", "5"))
+ACTIVE_REQUEST_MAX_DURATION = int(os.getenv("ACTIVE_REQUEST_MAX_DURATION", "600"))  # 10 min
+QUEUE_ENTRY_MAX_AGE = int(os.getenv("QUEUE_ENTRY_MAX_AGE", str(REQUEST_TIMEOUT + 60)))  # REQUEST_TIMEOUT + 60s
+STREAM_CHUNK_TIMEOUT = int(os.getenv("STREAM_CHUNK_TIMEOUT", "300"))  # 5 min between chunks
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "0"))  # 0 = keep all
 
 # Priority Scoring (0 = highest priority, higher numbers = lower priority)
 PRIORITY_BASE_LOADED = int(os.getenv("PRIORITY_BASE_LOADED", "100"))          # Model already loaded
@@ -174,6 +178,11 @@ class RequestTracker:
         normalized = self._normalize_model_name(model_name)
         self.recently_started_models = normalized
     
+    def cancel_queued_request(self, ip: str):
+        """Cancel a queued request (decrements ip_queued without touching active_request_count)"""
+        if self.ip_queued[ip] > 0:
+            self.ip_queued[ip] -= 1
+
     def remove_request(self, ip: str, model_name: str):
         """Mark request as completed"""
         if self.active_request_count > 0:
@@ -351,19 +360,44 @@ async def enqueue_request(request: Request, path: str):
     try:
         response = await asyncio.wait_for(future, timeout=REQUEST_TIMEOUT)
         return response
-    except asyncio.TimeoutError as e:
-        # Clean up active_requests and slot in case of timeout
+    except asyncio.TimeoutError:
+        # Clean up from both request_queue (if still queued) and active_requests
+        was_in_queue = False
         async with queue_lock:
+            # Remove from waiting queue if still there (orphaned entry bug fix)
+            for i, q in enumerate(request_queue):
+                if q.request_id == req_id:
+                    request_queue.pop(i)
+                    was_in_queue = True
+                    break
             if req_id in active_requests:
                 del active_requests[req_id]
-        tracker.remove_request(client_ip, model_name)
+        if was_in_queue:
+            tracker.cancel_queued_request(client_ip)
+        else:
+            tracker.remove_request(client_ip, model_name)
+        # Ensure broadcaster is cleaned up
+        _broadcaster = get_broadcaster()
+        await _broadcaster.request_completed(req_id, "timeout")
+        logger.warning(f"[{req_id}] Request timed out (was_in_queue={was_in_queue})", extra={"event": "request_timeout"})
         raise HTTPException(status_code=504, detail="Request timeout")
     except Exception as e:
-        # Clean up on any other error
+        # Clean up on any other error — same logic as timeout
+        was_in_queue = False
         async with queue_lock:
+            for i, q in enumerate(request_queue):
+                if q.request_id == req_id:
+                    request_queue.pop(i)
+                    was_in_queue = True
+                    break
             if req_id in active_requests:
                 del active_requests[req_id]
-        tracker.remove_request(client_ip, model_name)
+        if was_in_queue:
+            tracker.cancel_queued_request(client_ip)
+        else:
+            tracker.remove_request(client_ip, model_name)
+        _broadcaster = get_broadcaster()
+        await _broadcaster.request_completed(req_id, "error")
         raise
 
 async def queue_worker():
@@ -531,6 +565,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 request.request_id,
                 on_chunk=on_chunk,
                 on_done=on_stream_done,
+                chunk_timeout=STREAM_CHUNK_TIMEOUT,
             )
 
             # Create streaming response
@@ -553,7 +588,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 asyncio.create_task(delayed_poll())
 
             # Set Result
-            request.future.set_result(response)
+            if not request.future.done():
+                request.future.set_result(response)
             processing_time = time.time() - start_time
             total_duration = time.time() - request.timestamp
 
@@ -595,19 +631,125 @@ async def process_request(request: QueuedRequest, priority_score: int):
         )
         
         logger.exception(f"[{request.request_id}] Request Failed")
-        request.future.set_exception(e)
+        if not request.future.done():
+            request.future.set_exception(e)
         stats["failed_requests"] += 1
     finally:
         async with queue_lock:
             if request.request_id in active_requests:
                 del active_requests[request.request_id]
         tracker.remove_request(request.ip, request.model_name)
+        # Safety net: ensure broadcaster always cleans up (idempotent)
+        try:
+            _broadcaster = get_broadcaster()
+            await _broadcaster.request_completed(request.request_id, "error")
+        except Exception:
+            pass
+
+async def stale_request_sweeper():
+    """Background task that periodically cleans up stale/orphaned requests."""
+    logger.info("Stale request sweeper started", extra={"event": "proxy_startup"})
+    while True:
+        await asyncio.sleep(30)
+        try:
+            now = time.time()
+            broadcaster = get_broadcaster()
+
+            # 1. Sweep request_queue for orphaned entries
+            removed_queued = []
+            async with queue_lock:
+                to_remove = []
+                for i, req in enumerate(request_queue):
+                    age = now - req.timestamp
+                    future_done = req.future.done()
+                    if future_done or age > QUEUE_ENTRY_MAX_AGE:
+                        to_remove.append(i)
+                        removed_queued.append(req)
+                # Remove in reverse order to preserve indices
+                for i in reversed(to_remove):
+                    request_queue.pop(i)
+
+            for req in removed_queued:
+                tracker.cancel_queued_request(req.ip)
+                if not req.future.done():
+                    req.future.set_exception(
+                        HTTPException(status_code=504, detail="Request expired in queue")
+                    )
+                await broadcaster.request_completed(req.request_id, "timeout")
+                logger.warning(
+                    f"[{req.request_id}] Sweeper removed stale queued request (age={int(now - req.timestamp)}s)",
+                    extra={"event": "sweeper_queue_cleanup", "request_id": req.request_id}
+                )
+
+            # 2. Sweep active_requests for stale entries
+            stale_active = []
+            async with queue_lock:
+                for rid, req in list(active_requests.items()):
+                    age = now - req.timestamp
+                    if age > ACTIVE_REQUEST_MAX_DURATION:
+                        # Check if model is still loaded on Ollama
+                        model_loaded = tracker.is_model_loaded(req.model_name)
+                        if not model_loaded:
+                            stale_active.append(req)
+                            del active_requests[rid]
+                        else:
+                            logger.warning(
+                                f"[{rid}] Request active for {int(age)}s but model still loaded, keeping",
+                                extra={"event": "sweeper_active_warning", "request_id": rid}
+                            )
+
+            for req in stale_active:
+                tracker.remove_request(req.ip, req.model_name)
+                if not req.future.done():
+                    req.future.set_exception(
+                        HTTPException(status_code=504, detail="Request stale — model unloaded")
+                    )
+                await broadcaster.request_completed(req.request_id, "timeout")
+                stats["failed_requests"] += 1
+                logger.warning(
+                    f"[{req.request_id}] Sweeper removed stale active request (model unloaded, age={int(now - req.timestamp)}s)",
+                    extra={"event": "sweeper_active_cleanup", "request_id": req.request_id}
+                )
+
+            if removed_queued or stale_active:
+                logger.info(
+                    f"Sweeper: removed {len(removed_queued)} queued, {len(stale_active)} active",
+                    extra={"event": "sweeper_summary"}
+                )
+        except Exception as e:
+            logger.error(f"Stale request sweeper error: {e}", extra={"event": "sweeper_error"})
+
+async def log_retention_task():
+    """Background task that periodically deletes old log entries."""
+    if LOG_RETENTION_DAYS <= 0:
+        return  # Disabled
+    logger.info(f"Log retention task started (keeping {LOG_RETENTION_DAYS} days)", extra={"event": "proxy_startup"})
+    while True:
+        await asyncio.sleep(3600)  # Run hourly
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)
+            db = get_db()
+            session = db.get_session()
+            try:
+                deleted = session.query(RequestLog).filter(
+                    RequestLog.created_at < cutoff
+                ).delete(synchronize_session=False)
+                session.commit()
+                if deleted > 0:
+                    logger.info(f"Log retention: deleted {deleted} records older than {LOG_RETENTION_DAYS} days",
+                                extra={"event": "log_retention"})
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Log retention task error: {e}", extra={"event": "log_retention_error"})
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     vram_monitor.start()
     asyncio.create_task(queue_worker())
+    asyncio.create_task(stale_request_sweeper())
+    asyncio.create_task(log_retention_task())
     
     # Recover any pending fallback logs
     from database import get_db
