@@ -79,6 +79,7 @@
       </div>
     </section>
     <section id="histogram" class="tab-panel hidden">
+      <div id="histBanner" class="hist-banner hidden" role="status"></div>
       <div class="hist-controls">
         <button id="loadHistogram" type="button">Refresh</button>
         <label>View <select id="histView"><option value="hourly">Hourly (7d)</option><option value="daily">Daily (90d)</option></select></label>
@@ -169,11 +170,17 @@
         <div class="dash-card">
           <div class="dash-card-title">Queue Control</div>
           <div class="dash-card-body">
-            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
               <button id="adminPause" class="admin-btn">Pause Queue</button>
               <button id="adminResume" class="admin-btn">Resume Queue</button>
               <button id="adminClearStale" class="admin-btn admin-btn-danger">Clear Stale</button>
+              <button id="adminClearQueue" class="admin-btn admin-btn-danger">Clear Queue</button>
             </div>
+            <div style="margin-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+              <input type="text" id="adminStopRequestId" placeholder="request_id" style="flex:1;min-width:12rem;padding:0.35rem 0.5rem;background:#333;border:1px solid #444;color:#eee;border-radius:4px" />
+              <button id="adminStopRequest" type="button" class="admin-btn admin-btn-danger">Stop active request</button>
+            </div>
+            <p style="font-size:0.8rem;color:#888;margin:0.5rem 0 0">Stop aborts a streaming request; Clear Queue removes all waiting jobs.</p>
           </div>
         </div>
         <div class="dash-card">

@@ -711,3 +711,92 @@ async def clear_stale_requests(request: Request):
         "remaining_queue": len(_request_queue),
         "remaining_active": len(_active_requests),
     }
+
+
+@router.post("/clear-queue")
+async def clear_queue_endpoint(request: Request):
+    """
+    POST /proxy/clear-queue
+    Remove all waiting (queued) requests. Does not stop active upstream streams.
+    Admin-only.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    from live_broadcaster import get_broadcaster
+
+    broadcaster = get_broadcaster()
+    async with _queue_lock:
+        removed = list(_request_queue)
+        _request_queue.clear()
+    for qreq in removed:
+        _tracker.cancel_queued_request(qreq.ip)
+        if not qreq.future.done():
+            qreq.future.set_exception(
+                HTTPException(status_code=503, detail="Queue cleared by administrator")
+            )
+        await broadcaster.request_completed(qreq.request_id, "cancelled")
+    async with _queue_lock:
+        remaining = len(_request_queue)
+    return {"cleared": len(removed), "remaining_queue": remaining}
+
+
+@router.post("/cancel-request/{request_id}")
+async def cancel_single_queued_request(request: Request, request_id: str):
+    """
+    POST /proxy/cancel-request/{request_id}
+    Remove one queued request by id. Use /proxy/stop-request/{id} for active streams.
+    Admin-only.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    from live_broadcaster import get_broadcaster
+
+    broadcaster = get_broadcaster()
+    async with _queue_lock:
+        idx = None
+        for i, q in enumerate(_request_queue):
+            if q.request_id == request_id:
+                idx = i
+                break
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Request not in queue (may be active or completed)")
+        qreq = _request_queue.pop(idx)
+    _tracker.cancel_queued_request(qreq.ip)
+    if not qreq.future.done():
+        qreq.future.set_exception(
+            HTTPException(status_code=503, detail="Request cancelled by administrator")
+        )
+    await broadcaster.request_completed(qreq.request_id, "cancelled")
+    return {"ok": True, "request_id": request_id, "cancelled": True}
+
+
+@router.post("/stop-request/{request_id}")
+async def stop_active_request(request: Request, request_id: str):
+    """
+    POST /proxy/stop-request/{request_id}
+    Abort an active streaming request (closes upstream httpx stream). Admin-only.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    upstream = None
+    client = None
+    async with _queue_lock:
+        qreq = _active_requests.get(request_id)
+        if not qreq:
+            raise HTTPException(status_code=404, detail="No active request with this id")
+        if qreq.upstream_response is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Upstream stream not ready yet; retry shortly or use cancel-request if still queued",
+            )
+        qreq.admin_abort = True
+        upstream = qreq.upstream_response
+        client = qreq.upstream_client
+    if upstream:
+        try:
+            await upstream.aclose()
+        except Exception:
+            pass
+    if client:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+    return {"ok": True, "request_id": request_id, "stopped": True}

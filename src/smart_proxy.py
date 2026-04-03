@@ -102,7 +102,11 @@ class QueuedRequest:
     path: str  # Store the endpoint path
     future: asyncio.Future
     session_id: Optional[str] = None  # Set in enqueue_request for live UI
-    
+    # Set while upstream Ollama stream is active (for admin stop / abort)
+    upstream_response: Optional[httpx.Response] = None
+    upstream_client: Optional[httpx.AsyncClient] = None
+    admin_abort: bool = False
+
     def __repr__(self):
         wait_time = int(time.time() - self.timestamp)
         return f"QueuedRequest(id={self.request_id}, model={self.model_name}, ip={self.ip}, wait={wait_time}s)"
@@ -523,6 +527,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 content=request.raw_body,
             )
             r = await client.send(req, stream=True)
+            request.upstream_response = r
+            request.upstream_client = client
             status_code = r.status_code
             is_error = status_code >= 400
             status = "error" if is_error else "completed"
@@ -557,6 +563,37 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     try:
                         total_duration = time.time() - request.timestamp
                         processing_time = time.time() - start_time
+                        if request.admin_abort:
+                            response_text_val = "[Stopped by administrator]"
+                            if full_content:
+                                response_text_val = (
+                                    f"[Stopped by administrator] Partial output ({len(full_content)} chars)"
+                                )
+                            await asyncio.to_thread(
+                                request_repo.log_request,
+                                request.request_id,
+                                request.ip,
+                                request.model_name,
+                                "error",
+                                total_duration,
+                                priority_score,
+                                response_text=response_text_val,
+                                processing_time_seconds=processing_time,
+                                endpoint=request.path,
+                                user_agent=request.raw_request.headers.get("user-agent"),
+                                thinking_text=full_thinking or None,
+                            )
+                            await broadcaster.request_completed(rid, "cancelled")
+                            stats["failed_requests"] += 1
+                            logger.info(
+                                f"[{request.request_id}]",
+                                extra={
+                                    "event": "request_stopped_by_admin",
+                                    "request_id": request.request_id,
+                                    "duration_seconds": round(total_duration, 2),
+                                },
+                            )
+                            return
                         response_text_val = full_content if full_content else f"[HTTP {status_code}]"
                         outgoing_fp = None
                         if status == "completed" and request.body.get("messages") and full_content is not None:
@@ -622,6 +659,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     async for chunk in tee:
                         yield chunk
                 finally:
+                    request.upstream_response = None
+                    request.upstream_client = None
                     try:
                         await r.aclose()
                     except Exception:
@@ -653,6 +692,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 request.future.set_result(response)
 
         except Exception as http_error:
+            request.upstream_response = None
+            request.upstream_client = None
             if r is not None:
                 try:
                     await r.aclose()

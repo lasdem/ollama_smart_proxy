@@ -62,7 +62,7 @@
       // Auto-refresh data when switching tabs
       if (tab === 'home' && getKey()) loadHome();
       if (tab === 'conversations' && getKey()) loadSessions();
-      if (tab === 'histogram' && getKey()) loadHistogram();
+      if (tab === 'histogram') loadHistogram();
     });
   });
   document.querySelector('.tabs button[data-tab="home"]').classList.add('active');
@@ -167,9 +167,27 @@
       var icon = r.status === 'processing' ? '&#9889;' : '&#9201;';
       var dur = r.total_duration != null ? r.total_duration : r.wait_time;
       var durStr = (dur != null && !isNaN(parseFloat(dur))) ? parseFloat(dur).toFixed(1) + 's' : '0s';
-      return '<tr><td class="dash-icon">' + icon + '</td><td>' + escapeHtml(String(r.model || '?').slice(0, 40)) + '</td><td class="dash-dim">' + escapeHtml(String(r.ip || '?').slice(0, 15)) + '</td><td class="dash-num">' + durStr + '</td></tr>';
+      var rid = String(r.request_id || '');
+      var act = r.status === 'processing' ? 'stop' : 'cancel';
+      var btnLabel = act === 'stop' ? 'Stop' : 'Cancel';
+      var btn = getKey()
+        ? '<button type="button" class="queue-action-btn admin-btn admin-btn-danger" style="padding:0.2rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(rid) + '" data-act="' + act + '">' + btnLabel + '</button>'
+        : '';
+      return '<tr><td class="dash-icon">' + icon + '</td><td>' + escapeHtml(String(r.model || '?').slice(0, 36)) + '</td><td class="dash-dim">' + escapeHtml(String(r.ip || '?').slice(0, 12)) + '</td><td class="dash-num">' + durStr + '</td><td class="dash-queue-act">' + btn + '</td></tr>';
     }).join('');
-    el.innerHTML = '<table class="dash-table"><thead><tr><th>St</th><th>Model</th><th>IP</th><th>Time</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    el.innerHTML = '<table class="dash-table"><thead><tr><th>St</th><th>Model</th><th>IP</th><th>Time</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    el.onclick = function (ev) {
+      var btn = ev.target.closest && ev.target.closest('.queue-action-btn');
+      if (!btn) return;
+      var rid = btn.getAttribute('data-rid');
+      var act = btn.getAttribute('data-act');
+      if (!rid || !getKey()) return;
+      ev.preventDefault();
+      var url = act === 'stop'
+        ? API_BASE + '/stop-request/' + encodeURIComponent(rid)
+        : API_BASE + '/cancel-request/' + encodeURIComponent(rid);
+      adminPost(url, undefined, function () { loadHome(); });
+    };
   }
 
   function renderRecent(data) {
@@ -740,14 +758,35 @@
       asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
       asstDiv.setAttribute('data-request-id', reqId);
       if (reqId) assistantRowByRid[reqId] = asstDiv;
+      var stopCtl = '';
+      if (isLive && getKey() && reqId) {
+        if (req.status === 'processing') {
+          stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(reqId) + '" data-act="stop">Stop</button>';
+        } else if (req.status === 'queued') {
+          stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(reqId) + '" data-act="cancel">Cancel</button>';
+        }
+      }
       asstDiv.innerHTML =
         '<div class="role">Assistant · ' + escapeHtml(req.model || '') + ' · ' +
         (isLive ? '<span class="streaming-indicator">streaming…</span>' : escapeHtml(asstDuration)) +
+        stopCtl +
         '</div>' +
         thinkingHtml +
         '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>';
       container.appendChild(asstDiv);
     });
+    container.onclick = function (ev) {
+      var btn = ev.target.closest && ev.target.closest('.conv-stop-btn');
+      if (!btn) return;
+      var rid = btn.getAttribute('data-rid');
+      var act = btn.getAttribute('data-act');
+      if (!rid || !getKey()) return;
+      ev.preventDefault();
+      var url = act === 'stop'
+        ? API_BASE + '/stop-request/' + encodeURIComponent(rid)
+        : API_BASE + '/cancel-request/' + encodeURIComponent(rid);
+      adminPost(url, undefined, function () { loadSessions(); loadHome(); });
+    };
     requestAnimationFrame(function () { scrollThreadToBottom(); });
   }
 
@@ -912,6 +951,12 @@
 
   function applyHistChartHeight() {
     var px = histChartHeightPx;
+    if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 900px)').matches) {
+      var vhCap = Math.floor((window.innerHeight || 600) * 0.42);
+      var cap = Math.min(360, vhCap > 200 ? vhCap : 360);
+      px = Math.min(px, cap);
+      px = Math.max(HIST_HEIGHT_MIN, px);
+    }
     document.querySelectorAll('.hist-canvas-wrap').forEach(function (w) {
       w.style.height = px + 'px';
     });
@@ -982,19 +1027,57 @@
     }
   }
 
+  function setHistBanner(msg, isError) {
+    var banner = document.getElementById('histBanner');
+    if (!banner) return;
+    if (!msg) {
+      banner.classList.add('hidden');
+      banner.textContent = '';
+      return;
+    }
+    banner.classList.remove('hidden');
+    banner.textContent = msg;
+    banner.style.color = isError ? '#f88' : '#aaa';
+  }
+
   function loadHistogram() {
-    var key = getKey();
-    if (!key) return;
     if (typeof Chart === 'undefined') return;
     applyHistChartHeight();
     var viewEl = document.getElementById('histView');
     var metricEl = document.getElementById('histMetric');
     if (!viewEl || !metricEl) return;
+    var key = getKey();
+    if (!key) {
+      setHistBanner('Set admin key (Admin tab or ?key= in URL) to load histogram charts.', false);
+      if (histChartModel) { histChartModel.destroy(); histChartModel = null; }
+      if (histChartIp) { histChartIp.destroy(); histChartIp = null; }
+      return;
+    }
+    setHistBanner('Loading…', false);
     var view = viewEl.value;
     var metric = metricEl.value;
     fetch(API_BASE + '/analytics/histogram?view=' + encodeURIComponent(view) + '&metric=' + encodeURIComponent(metric) + '&top_n=12', { headers: apiHeaders() })
-      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (r) {
+        if (r.status === 403) return Promise.reject(new Error('Forbidden — invalid or missing admin key'));
+        if (r.status === 503) {
+          return r.json().then(function (j) {
+            var d = (j && j.detail) ? j.detail : 'Histogram unavailable';
+            return Promise.reject(new Error(d));
+          }).catch(function () {
+            return Promise.reject(new Error('Histogram unavailable (rollup tables missing or server error)'));
+          });
+        }
+        if (!r.ok) return Promise.reject(new Error('HTTP ' + r.status));
+        return r.json();
+      })
       .then(function (data) {
+        var bm = data.by_model || [];
+        var bi = data.by_ip || [];
+        if (bm.length === 0 && bi.length === 0) {
+          setHistBanner('No rollup data in this time window yet. Series appear after requests complete and hourly/daily rollups are populated.', false);
+        } else {
+          setHistBanner('', false);
+        }
         var labels = (data.buckets || []).map(function (b) {
           var s = String(b);
           return s.length > 16 ? s.slice(5, 16) : s;
@@ -1038,15 +1121,20 @@
         histChartModel = new Chart(elM, { type: 'line', data: { labels: labels, datasets: mkDs(data.by_model) }, options: opts });
         histChartIp = new Chart(elI, { type: 'line', data: { labels: labels, datasets: mkDs(data.by_ip) }, options: opts });
       })
-      .catch(function (e) { console.error(e); alert('Histogram: ' + e.message); });
+      .catch(function (e) {
+        console.error(e);
+        setHistBanner(String(e.message || e), true);
+        if (histChartModel) { histChartModel.destroy(); histChartModel = null; }
+        if (histChartIp) { histChartIp.destroy(); histChartIp = null; }
+      });
   }
 
   var loadHistBtn = document.getElementById('loadHistogram');
   if (loadHistBtn) loadHistBtn.addEventListener('click', function () { loadHistogram(); });
   var histViewEl = document.getElementById('histView');
   var histMetricEl = document.getElementById('histMetric');
-  if (histViewEl) histViewEl.addEventListener('change', function () { if (getKey()) loadHistogram(); });
-  if (histMetricEl) histMetricEl.addEventListener('change', function () { if (getKey()) loadHistogram(); });
+  if (histViewEl) histViewEl.addEventListener('change', function () { loadHistogram(); });
+  if (histMetricEl) histMetricEl.addEventListener('change', function () { loadHistogram(); });
 
   /* Auto-load sessions on start if key is set */
   if (getKey()) { loadSessions(); }
@@ -1060,11 +1148,18 @@
     el.style.display = 'block';
     el.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
   }
-  function adminPost(url, body) {
-    return fetch(url, { method: 'POST', headers: apiHeaders(), body: body ? JSON.stringify(body) : undefined })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function (data) { showAdminResult(data); })
-      .catch(function (e) { showAdminResult('Error: ' + e.message); });
+  function adminPost(url, body, onSuccess) {
+    return fetch(url, { method: 'POST', headers: apiHeaders(), body: body !== undefined && body !== null ? JSON.stringify(body) : undefined })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          if (!r.ok) {
+            throw new Error((data && data.detail) ? data.detail : ('HTTP ' + r.status));
+          }
+          return data;
+        });
+      })
+      .then(function (data) { showAdminResult(data); if (typeof onSuccess === 'function') onSuccess(data); })
+      .catch(function (e) { showAdminResult('Error: ' + (e.message || String(e))); });
   }
   var pauseBtn = document.getElementById('adminPause');
   if (pauseBtn) pauseBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { pause: true }); });
@@ -1072,6 +1167,18 @@
   if (resumeBtn) resumeBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { pause: false }); });
   var clearStaleBtn = document.getElementById('adminClearStale');
   if (clearStaleBtn) clearStaleBtn.addEventListener('click', function () { adminPost(API_BASE + '/clear-stale'); });
+  var clearQueueBtn = document.getElementById('adminClearQueue');
+  if (clearQueueBtn) clearQueueBtn.addEventListener('click', function () {
+    if (!window.confirm('Remove all jobs from the waiting queue? Active streams are not stopped.')) return;
+    adminPost(API_BASE + '/clear-queue', undefined, function () { loadHome(); });
+  });
+  var adminStopRequestBtn = document.getElementById('adminStopRequest');
+  if (adminStopRequestBtn) adminStopRequestBtn.addEventListener('click', function () {
+    var inp = document.getElementById('adminStopRequestId');
+    var rid = inp && inp.value ? inp.value.trim() : '';
+    if (!rid) { showAdminResult('Enter a request_id'); return; }
+    adminPost(API_BASE + '/stop-request/' + encodeURIComponent(rid), undefined, function () { loadHome(); });
+  });
   var dbDownBtn = document.getElementById('adminDbDown');
   if (dbDownBtn) dbDownBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { db_available: false }); });
   var dbRestoreBtn = document.getElementById('adminDbRestore');

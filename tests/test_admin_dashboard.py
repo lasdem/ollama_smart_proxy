@@ -480,5 +480,39 @@ class TestQueueEndpoint:
             assert "priority" in req
 
 
+class TestQueueAdminActions:
+    """POST /proxy/clear-queue, /proxy/cancel-request/{id}, /proxy/stop-request/{id}"""
+
+    def test_clear_queue(self):
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.post(
+            f"{TestConfig.PROXY_URL}/proxy/clear-queue",
+            headers=headers,
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "cleared" in data and "remaining_queue" in data
+        assert data["remaining_queue"] == 0
+
+    def test_stop_request_unknown(self):
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.post(
+            f"{TestConfig.PROXY_URL}/proxy/stop-request/does-not-exist-xyz",
+            headers=headers,
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 404
+
+    def test_cancel_request_unknown(self):
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.post(
+            f"{TestConfig.PROXY_URL}/proxy/cancel-request/does-not-exist-xyz",
+            headers=headers,
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 404
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
