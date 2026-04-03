@@ -245,6 +245,9 @@ docker-compose exec postgres psql -U proxy -d proxy_db -f /app/scripts/schema.sq
 # Migration
 ./.conda/bin/python scripts/migrate_db.py migrate
 
+# If schema is already v4 but analytics rollups are incomplete (e.g. backfill skipped while tables had live data):
+./.conda/bin/python scripts/migrate_db.py rebuild_rollups
+
 # Backfill from fallback logs
 ./.conda/bin/python scripts/migrate_db.py backfill
 ```

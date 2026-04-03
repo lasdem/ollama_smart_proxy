@@ -68,3 +68,5 @@ def test_histogram_series_shape():
     assert "by_ip" in data
     assert "metric" in data
     assert "view" in data
+    # Hourly 7d view must enumerate the full timeline (~7*24h), not only hours with rollup rows
+    assert len(data["buckets"]) >= 160

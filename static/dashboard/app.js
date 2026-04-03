@@ -1023,7 +1023,12 @@
           plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, color: '#bbb' } } },
           scales: {
             x: { ticks: { maxRotation: 60, minRotation: 30, color: '#888', font: { size: 9 } }, grid: { color: '#333' } },
-            y: { title: { display: true, text: yTitle, color: '#888' }, ticks: { color: '#888' }, grid: { color: '#333' } }
+            y: {
+              beginAtZero: true,
+              title: { display: true, text: yTitle, color: '#888' },
+              ticks: { color: '#888' },
+              grid: { color: '#333' }
+            }
           }
         };
         var elM = document.getElementById('chartModel');

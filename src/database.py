@@ -8,7 +8,7 @@ import logging
 import json
 import fcntl
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, ForeignKey, Index, func, inspect as sa_inspect
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -488,6 +488,38 @@ class DatabaseConnection:
         return recovered_count
 
 
+def _coerce_dt_utc_naive(dt: Any) -> Optional[datetime]:
+    """Normalize DB/driver datetime or ISO string to naive UTC datetime."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        s = dt.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+    if isinstance(dt, datetime):
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    return None
+
+
+def _enumerate_histogram_buckets(view: str, start_b: datetime, end_b: datetime) -> List[datetime]:
+    """Full list of hour or day bucket starts from start_b through end_b inclusive."""
+    buckets: List[datetime] = []
+    if view == "daily":
+        cur = start_b
+        while cur <= end_b:
+            buckets.append(cur)
+            cur = cur + timedelta(days=1)
+    else:
+        cur = start_b
+        while cur <= end_b:
+            buckets.append(cur)
+            cur = cur + timedelta(hours=1)
+    return buckets
+
+
 class AnalyticsQueryBuilder:
     """Analytics query builder for database-agnostic queries"""
 
@@ -899,38 +931,9 @@ class AnalyticsQueryBuilder:
 
         session = self.db.get_session()
         try:
-            # Enumerate buckets
-            if view == "daily":
-                buckets_rows = session.execute(
-                    text(
-                        f"""
-                    SELECT DISTINCT {bucket_sql} AS b FROM {table_m}
-                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
-                    ORDER BY b
-                    """
-                    ),
-                    {"s": start_b, "e": end_b},
-                ).fetchall()
-            else:
-                buckets_rows = session.execute(
-                    text(
-                        f"""
-                    SELECT DISTINCT {bucket_sql} AS b FROM {table_m}
-                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
-                    ORDER BY b
-                    """
-                    ),
-                    {"s": start_b, "e": end_b},
-                ).fetchall()
-            buckets = [r[0] for r in buckets_rows]
-            if not buckets:
-                return {
-                    "view": view,
-                    "metric": metric,
-                    "buckets": [],
-                    "by_model": [],
-                    "by_ip": [],
-                }
+            # Full timeline of bucket starts (do not derive from DISTINCT rollups only — sparse
+            # rollups would yield one bucket and a useless chart even when request_logs has history).
+            buckets = _enumerate_histogram_buckets(view, start_b, end_b)
 
             # Top series by total request_count in window (metric-specific denominator)
             if metric in ("queue_wait", "processing", "duration"):
@@ -1003,7 +1006,13 @@ class AnalyticsQueryBuilder:
                         ),
                         {"s": start_b, "e": end_b, "lab": lab},
                     ).fetchall()
-                    rowmap = {r[0]: r for r in rows}
+                    rowmap: Dict[Any, Any] = {}
+                    for r in rows:
+                        raw_b = _coerce_dt_utc_naive(r[0])
+                        if raw_b is None:
+                            continue
+                        bk = floor_day_utc(raw_b) if view == "daily" else floor_hour_utc(raw_b)
+                        rowmap[bk] = r
 
                     vals = []
                     for b in buckets:
