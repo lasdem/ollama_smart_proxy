@@ -12,41 +12,50 @@ logger = logging.getLogger(__name__)
 # Result: ("content", str) or ("thinking", str) or None
 ExtractResult = Optional[Tuple[str, str]]
 
+# One NDJSON line may yield multiple parts (e.g. same chunk with both thinking and content deltas).
+Part = Tuple[str, str]
 
-def extract_text_from_ndjson(line: bytes, path: str) -> ExtractResult:
+
+def extract_parts_from_ndjson(line: bytes, path: str) -> list[Part]:
     """
-    Extract displayable text from one NDJSON line based on endpoint path.
-    Returns ("content", text), ("thinking", text), or None.
+    Extract displayable text parts from one NDJSON line.
+    For /api/chat: message.thinking then message.content.
+    For /api/generate: top-level thinking then response (ollama run uses this endpoint).
     """
     try:
         data = json.loads(line.decode("utf-8", errors="replace"))
     except Exception:
-        return None
+        return []
     path_lower = path.strip("/").lower()
 
-    # Ollama error responses: {"error": "..."}
     error_msg = data.get("error")
     if isinstance(error_msg, str) and error_msg:
-        return ("content", f"[Error] {error_msg}")
+        return [("content", f"[Error] {error_msg}")]
 
-    # /api/chat: message.content and message.thinking (thinking models)
+    # /api/chat: message.thinking then message.content (thinking models interleave both)
     if "api/chat" in path_lower:
         msg = data.get("message")
         if isinstance(msg, dict):
-            content = msg.get("content")
-            if isinstance(content, str) and content:
-                return ("content", content)
+            out: list[Part] = []
             thinking = msg.get("thinking")
             if isinstance(thinking, str) and thinking:
-                return ("thinking", thinking)
-        return None
-    # /api/generate: response
+                out.append(("thinking", thinking))
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                out.append(("content", content))
+            return out
+        return []
+
     if "api/generate" in path_lower:
-        content = data.get("response")
-        if isinstance(content, str) and content:
-            return ("content", content)
-        return None
-    # /v1/chat/completions: choices[0].delta.content (streaming) or choices[0].message.content (non-streaming)
+        out: list[Part] = []
+        thinking = data.get("thinking")
+        if isinstance(thinking, str) and thinking:
+            out.append(("thinking", thinking))
+        resp = data.get("response")
+        if isinstance(resp, str) and resp:
+            out.append(("content", resp))
+        return out
+
     if "v1/chat/completions" in path_lower:
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
@@ -54,23 +63,31 @@ def extract_text_from_ndjson(line: bytes, path: str) -> ExtractResult:
             if isinstance(delta, dict):
                 content = delta.get("content")
                 if isinstance(content, str) and content:
-                    return ("content", content)
-            # Non-streaming: message.content
+                    return [("content", content)]
             message = choices[0].get("message")
             if isinstance(message, dict):
                 content = message.get("content")
                 if isinstance(content, str) and content:
-                    return ("content", content)
-        return None
-    # /v1/completions: choices[0].text
+                    return [("content", content)]
+        return []
+
     if "v1/completions" in path_lower:
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             text = choices[0].get("text")
             if isinstance(text, str) and text:
-                return ("content", text)
-        return None
-    return None
+                return [("content", text)]
+        return []
+
+    return []
+
+
+def extract_text_from_ndjson(line: bytes, path: str) -> ExtractResult:
+    """
+    Back-compat: first part only (prefer thinking if both present, matching extract_parts order).
+    """
+    parts = extract_parts_from_ndjson(line, path)
+    return parts[0] if parts else None
 
 
 async def tee_stream(
@@ -84,7 +101,8 @@ async def tee_stream(
     """
     Tee the raw response stream: yield each chunk unchanged to the client,
     and parse NDJSON lines to accumulate response text. Accumulates content and
-    thinking separately. Calls on_chunk(request_id, text) for content deltas only.
+    thinking separately. Calls on_chunk(request_id, text, kind) for each delta
+    (kind is "content" or "thinking").
     Calls on_done(request_id, full_content, full_thinking) at end.
     on_done can be async; it will be scheduled with create_task.
 
@@ -140,11 +158,11 @@ async def tee_stream(
                     line = line[6:]
                 if line.strip() == b"[DONE]":
                     continue
-                res = extract_text_from_ndjson(line, path)
-                process_result(res)
+                for part in extract_parts_from_ndjson(line, path):
+                    process_result(part)
         if buffer.strip():
-            res = extract_text_from_ndjson(buffer, path)
-            process_result(res)
+            for part in extract_parts_from_ndjson(buffer, path):
+                process_result(part)
     finally:
         full_content = "".join(accumulated_content)
         full_thinking = "".join(accumulated_thinking)

@@ -423,6 +423,25 @@
   /* ---------- RAF chunk batching ---------- */
   var pendingChunks = {};
   var chunkRAF = null;
+
+  /** Insert thinking block (details/pre) before the assistant body if missing (DB has no thinking_text until stream end). */
+  function ensureThinkingBlock(row) {
+    if (row.querySelector('.thread-thinking .streamable-thinking')) return;
+    var bodyEl = row.querySelector('.body');
+    if (!bodyEl) return;
+    var details = document.createElement('details');
+    details.className = 'thread-thinking thread-thinking-live';
+    details.setAttribute('open', 'open');
+    details.innerHTML = '<summary>Thinking</summary><pre class="thread-thinking-body streamable-thinking"></pre>';
+    row.insertBefore(details, bodyEl);
+  }
+
+  /** Keep the scrollable thinking <pre> pinned to the latest token (max-height + overflow-y: auto in CSS). */
+  function scrollThinkingPreToBottom(preEl) {
+    if (!preEl) return;
+    preEl.scrollTop = preEl.scrollHeight;
+  }
+
   function flushChunkUpdates() {
     chunkRAF = null;
     var needScroll = false;
@@ -433,15 +452,27 @@
       var row = findAssistantDiv(rid);
       if (row) {
         if (info.kind === 'thinking') {
+          ensureThinkingBlock(row);
           var thinkingPre = row.querySelector('.thread-thinking .streamable-thinking');
-          if (thinkingPre) thinkingPre.textContent = info.fullThinking;
+          if (thinkingPre) {
+            thinkingPre.textContent = info.fullThinking;
+            scrollThinkingPreToBottom(thinkingPre);
+          }
           var thinkingDetails = row.querySelector('.thread-thinking');
           if (thinkingDetails) thinkingDetails.setAttribute('open', 'open');
         } else {
+          /* Content chunks still carry full_thinking; keep the reasoning pane in sync and scrolled. */
+          if (info.fullThinking && String(info.fullThinking).length > 0) {
+            ensureThinkingBlock(row);
+            var thPre = row.querySelector('.thread-thinking .streamable-thinking');
+            if (thPre) {
+              thPre.textContent = info.fullThinking;
+              scrollThinkingPreToBottom(thPre);
+            }
+          }
           var streamEl = row.querySelector('.body.streamable');
           if (streamEl) streamEl.textContent = info.fullText;
-          var thinkingDetails = row.querySelector('.thread-thinking');
-          if (thinkingDetails) thinkingDetails.removeAttribute('open');
+          /* Do not collapse thinking when answer tokens arrive — user should still see streamed reasoning. */
         }
         if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === rid; })) needScroll = true;
       }
@@ -470,11 +501,13 @@
     historyLimitEl.addEventListener('change', function () { localStorage.setItem('proxy_history_limit', this.value); });
   }
 
-  /** Check if any request in the current thread is actively streaming live chunks. */
+  /** Check if any request in the current thread is actively streaming live chunks (content or thinking-only). */
   function hasActiveStreaming() {
     if (!currentSessionRequests) return false;
     for (var i = 0; i < currentSessionRequests.length; i++) {
-      if (liveAccumulated[currentSessionRequests[i].request_id]) return true;
+      var rid = currentSessionRequests[i].request_id;
+      if (liveAccumulated[rid]) return true;
+      if (liveThinkingAccumulated[rid]) return true;
     }
     return false;
   }

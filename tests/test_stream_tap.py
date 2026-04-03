@@ -22,6 +22,19 @@ def test_extract_api_generate():
     assert extract_text_from_ndjson(line, "/api/generate") == ("content", " world")
 
 
+def test_extract_api_generate_thinking_ollama_run():
+    """ollama run uses /api/generate; reasoning is top-level thinking, not message.thinking."""
+    from stream_tap import extract_parts_from_ndjson
+
+    line = b'{"thinking":"step ","response":"","done":false}'
+    assert extract_parts_from_ndjson(line, "/api/generate") == [("thinking", "step ")]
+    line2 = b'{"thinking":"a","response":"b","done":false}'
+    assert extract_parts_from_ndjson(line2, "api/generate") == [
+        ("thinking", "a"),
+        ("content", "b"),
+    ]
+
+
 def test_extract_v1_chat_completions():
     line = b'{"choices":[{"delta":{"content":"!"}}]}'
     assert extract_text_from_ndjson(line, "/v1/chat/completions") == ("content", "!")
@@ -37,6 +50,17 @@ def test_extract_api_chat_thinking():
     """Thinking models: empty content, thinking has text"""
     line = b'{"message":{"role":"assistant","content":"","thinking":"Let me analyze..."},"done":false}'
     assert extract_text_from_ndjson(line, "/api/chat") == ("thinking", "Let me analyze...")
+
+
+def test_extract_api_chat_thinking_and_content_same_line():
+    """Rare: one chunk may carry both reasoning and answer fragments."""
+    from stream_tap import extract_parts_from_ndjson
+
+    line = b'{"message":{"role":"assistant","content":"1","thinking":"step "},"done":false}'
+    assert extract_parts_from_ndjson(line, "/api/chat") == [
+        ("thinking", "step "),
+        ("content", "1"),
+    ]
 
 
 def test_extract_api_chat_error_response():

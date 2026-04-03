@@ -14,6 +14,29 @@ Each entry should include:
 
 ## 2026-04-03
 
+### v4.7.4 Thinking panel autoscroll (dashboard)
+- **Topic**: Long streamed reasoning stayed scrolled to the top of the fixed-height thinking box.
+- **Summary**: After setting `textContent` on `.thread-thinking-body`, set `scrollTop = scrollHeight`. Sync thinking text from `full_thinking` on content-kind chunks so the pane updates when the RAF batch ends on a content chunk.
+- **Related Files**: `static/dashboard/app.js`, `docs/changelog/v4.7.4_THINKING_AUTOSCROLL.md`
+
+### v4.7.3 /api/generate thinking in stream_tap
+- **Topic**: `ollama run` via proxy showed requests in the UI but not reasoning; `curl` to `/api/chat` with `think: true` did show reasoning.
+- **Summary**: `ollama run` uses `/api/generate`, which streams **`thinking`** and **`response`** at the top level. The tap only accumulated **`response`**, so thinking was dropped. Added extraction for **`thinking`** then **`response`** on generate paths.
+- **Related Files**: `src/stream_tap.py`, `tests/test_stream_tap.py`, `docs/changelog/v4.7.3_GENERATE_THINKING.md`
+
+### Request body passthrough (no injection)
+- **Topic**: The proxy must not modify JSON bodies sent to Ollama (e.g. adding `think`). Clients that need reasoning in streamed NDJSON must send `"think": true` per Ollama’s API; `ollama run` and HTTP clients differ by design.
+- **Related Files**: `src/smart_proxy.py` (enqueue forwards `raw_body` unchanged)
+
+### v4.7.1 WebUI thinking visible during streaming
+- **Topic**: Proxy Monitor showed final answer but not the reasoning trace while the response was still streaming.
+- **Summary**:
+  - Live assistant rows only rendered the thinking block when DB `thinking_text` or `liveThinkingAccumulated` was already set; the first WS thinking chunks had no `.thread-thinking` node. Added `ensureThinkingBlock()` before updating streamed thinking text.
+  - Stopped closing the thinking panel when content chunks arrived (users could no longer see reasoning during answer streaming).
+  - `hasActiveStreaming()` includes thinking-only accumulation so periodic session refresh does not rebuild the thread mid-stream.
+  - `stream_tap`: parse both `message.thinking` and `message.content` in one NDJSON line (thinking first), matching Ollama’s streaming docs.
+- **Related Files**: `static/dashboard/app.js`, `src/stream_tap.py`, `tests/test_stream_tap.py`, `docs/changelog/v4.7.1_WEBUI_THINKING_STREAM.md`
+
 ### v4.7 Proxy stability (httpx lifecycle, deferred stream completion, analytics gating)
 - **Topic**: Restore reliable streaming and queue slots after v4.5/v4.6 performance changes; avoid shared httpx client regressions and SQLite lock pressure from parallel analytics.
 - **Summary**:

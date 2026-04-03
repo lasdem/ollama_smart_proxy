@@ -265,7 +265,7 @@ async def enqueue_request(request: Request, path: str):
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading request: {e}")
-    
+
     model_name = body.get('model')
     if not model_name:
         raise HTTPException(status_code=400, detail="Missing model field")
