@@ -74,9 +74,27 @@
      ================================================================ */
   var HOME_DISPLAY_LIMIT = 10;
   var HOME_RECENT_LIMIT = 5;
+  /** Narrow columns for faster /proxy/query_db (skip large TEXT blobs). */
+  var FIELDS_HOME_RECENT = 'request_id,model,ip_address,status,duration_seconds,processing_time_seconds,queue_wait_seconds,timestamp_received,timestamp_completed,session_id,endpoint';
+  /** Session list + thread: omit request_body (large); keep response/thinking for display. API uses key `model`. */
+  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score';
   var DEBOUNCE_MS = 150;
+  /** Min interval between WebSocket-triggered home refreshes (reduces API storm under load). */
+  var WS_HOME_THROTTLE_MS = 2500;
+  var lastWsHomeRefresh = 0;
   var homeDebounceTimer = null;
   var sessionsDebounceTimer = null;
+  function getActiveTabId() {
+    var active = document.querySelector('.tabs button.active');
+    return active ? active.getAttribute('data-tab') : '';
+  }
+  function throttledLoadHomeFromWs() {
+    if (getActiveTabId() !== 'home') return;
+    var now = Date.now();
+    if (now - lastWsHomeRefresh < WS_HOME_THROTTLE_MS) return;
+    lastWsHomeRefresh = now;
+    debouncedLoadHome();
+  }
   function debouncedLoadHome() {
     if (homeDebounceTimer) clearTimeout(homeDebounceTimer);
     homeDebounceTimer = setTimeout(function () { homeDebounceTimer = null; loadHome(); }, DEBOUNCE_MS);
@@ -261,7 +279,7 @@
       ? fetch(API_BASE + '/analytics?hours=' + encodeURIComponent(hours) + '&limit=' + HOME_DISPLAY_LIMIT, { headers: apiHeaders() }).then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; })
       : Promise.resolve({ error: 'Set key for analytics' });
     var recentPromise = key
-      ? fetch(API_BASE + '/query_db?limit=' + HOME_RECENT_LIMIT + '&status=completed,error&sort_by=timestamp_completed&sort_order=desc&from_time=' + encodeURIComponent(fromTime), { headers: apiHeaders() }).then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; })
+      ? fetch(API_BASE + '/query_db?limit=' + HOME_RECENT_LIMIT + '&status=completed,error&sort_by=timestamp_completed&sort_order=desc&from_time=' + encodeURIComponent(fromTime) + '&fields=' + encodeURIComponent(FIELDS_HOME_RECENT), { headers: apiHeaders() }).then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); }).catch(function (e) { return { error: String(e.message || e) }; })
       : Promise.resolve({ error: 'Set key for recent' });
     Promise.all([healthPromise, queuePromise, vramPromise, analyticsPromise, recentPromise]).then(function (results) {
       var health = results[0];
@@ -301,7 +319,7 @@
   var wsStatusEl = document.getElementById('wsStatus');
   var homeWsStatusEl = document.getElementById('homeWsStatus');
   var convWsIndicator = document.getElementById('convWsIndicator');
-  var liveMode = false; // true when user clicked "Go live" (chunk streaming into threads)
+  var liveMode = false; // set by "Go live" / "Stop live" (UI); chunk rendering no longer depends on it
   var liveAccumulated = {};
   var liveThinkingAccumulated = {};
   var reconnectDelay = 2000;
@@ -339,7 +357,7 @@
       try {
         var msg = JSON.parse(ev.data);
         if (msg.type === 'request_queued' || msg.type === 'request_processing' || msg.type === 'request_started' || msg.type === 'request_completed') {
-          debouncedLoadHome();
+          throttledLoadHomeFromWs();
         }
         if (msg.type === 'request_started') {
           var sid = msg.metadata && msg.metadata.session_id;
@@ -347,12 +365,17 @@
           // Only fetch sessions list if we're not already viewing a thread for this session
           var viewingSid = currentSessionRequests && currentSessionRequests._sid;
           if (!viewingSid || viewingSid !== sid) {
-            debouncedLoadSessions();
+            if (getActiveTabId() === 'conversations' || pendingLiveOpen) {
+              debouncedLoadSessions();
+            }
           }
         } else if (msg.type === 'request_completed') {
           // Finalize live text into completed state, then refresh
           finalizeCompletedRequest(msg.request_id);
-        } else if (msg.type === 'chunk' && liveMode) {
+        } else if (msg.type === 'chunk') {
+          // Always apply chunk payloads to the DOM when a matching row exists (flushChunkUpdates
+          // no-ops if not in view). Do not gate on liveMode — WebSocket auto-connect does not
+          // set liveMode, so "Go live" was required before, which hid streamed text during chat.
           var kind = msg.kind || 'content';
           var fullText = msg.full !== undefined ? msg.full : ((liveAccumulated[msg.request_id] || '') + (msg.delta || ''));
           var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
@@ -514,6 +537,9 @@
   }
 
   function findAssistantDiv(requestId) {
+    if (!requestId) return null;
+    var mapped = assistantRowByRid[requestId];
+    if (mapped && mapped.isConnected) return mapped;
     var divs = document.querySelectorAll('#threadMessages .thread-msg[data-request-id]');
     for (var i = 0; i < divs.length; i++) {
       if (divs[i].getAttribute('data-request-id') === requestId) return divs[i];
@@ -533,6 +559,8 @@
   /* -- Sessions list -- */
   var currentSessionRequests = null;
   var pendingLiveOpen = null; // session_id string to auto-open after loadSessions
+  /** O(1) lookup for assistant rows while a thread is open (avoids repeated querySelectorAll per chunk). */
+  var assistantRowByRid = {};
 
   function loadSessions() {
     var key = getKey();
@@ -540,8 +568,8 @@
     var limitEl = document.getElementById('convLimit');
     var limit = (limitEl && limitEl.value) ? parseInt(limitEl.value, 10) : 100;
     if (isNaN(limit) || limit < 1) limit = 100;
-    if (limit > 1000) limit = 1000;
-    fetch(API_BASE + '/query_db?limit=' + limit + '&sort_by=timestamp_received&sort_order=desc', { headers: apiHeaders() })
+    if (limit > 500) limit = 500;
+    fetch(API_BASE + '/query_db?limit=' + limit + '&sort_by=timestamp_received&sort_order=desc&fields=' + encodeURIComponent(FIELDS_SESSION_LIST), { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
         var bySession = {};
@@ -613,12 +641,14 @@
     document.getElementById('sessionThread').classList.add('hidden');
     document.getElementById('sessionList').style.display = '';
     currentSessionRequests = null;
+    assistantRowByRid = {};
   });
 
   /* -- Thread view -- */
   function showSessionThread(sid, requests) {
     currentSessionRequests = requests;
     currentSessionRequests._sid = sid;
+    assistantRowByRid = {};
     document.getElementById('sessionList').style.display = 'none';
     document.getElementById('sessionThread').classList.remove('hidden');
     var titleModel = requests.length ? (requests[0].model || '') : '';
@@ -674,6 +704,7 @@
       var asstDiv = document.createElement('div');
       asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
       asstDiv.setAttribute('data-request-id', reqId);
+      if (reqId) assistantRowByRid[reqId] = asstDiv;
       asstDiv.innerHTML =
         '<div class="role">Assistant · ' + escapeHtml(req.model || '') + ' · ' +
         (isLive ? '<span class="streaming-indicator">streaming…</span>' : escapeHtml(asstDuration)) +

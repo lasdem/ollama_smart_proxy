@@ -82,16 +82,21 @@ Each entry should include:
 
 ---
 
-## [Current Date]
+## 2026-04-03 (continued)
 
-### [Your First Investigation Topic]
-- **Topic**: [e.g., Email Unsubscribe Functionality]
-- **Summary**: 
-  - [Brief description of what you investigated]
-- **Key Findings**:
-  - [Important discovery 1]
-  - [Important discovery 2]
-- **Related Files**: 
-  - [List of relevant files]
+### v4.6 Snappy proxy follow-up
+- **Topic:** Further performance — connection reuse, parallel analytics, lean dashboard queries
+- **Summary:** Shared `httpx.AsyncClient` in lifespan; session fingerprint lookup offloaded to thread pool; analytics aggregations run in parallel via `asyncio.gather`; `DB_POOL_*` env; dashboard `query_db` uses `fields` to omit large columns (especially `request_body`).
+- **Related Files:** `src/smart_proxy.py`, `src/proxy_endpoints.py`, `src/database.py`, `static/dashboard/app.js`, `docs/changelog/v4.6_PERFORMANCE_SNAPPY.md`
+
+---
+
+## 2026-04-03
+
+### v4.5 Performance plan — streaming lifecycle, DB, WebUI
+- **Topic**: Implement performance review plan (streaming cleanup order, httpx lifecycle, DB indexes, dashboard load)
+- **Summary**: Slot release (`active_requests`, `tracker`, stats, logging) moved to `on_stream_done` after `tee_stream` completes; `tee_stream` awaits async `on_done`; `streaming_body()` closes httpx response + client after consumption; composite indexes for `query_db`; dashboard WS throttle and `assistantRowByRid` map.
+- **Key Findings**: Prior `process_request` `finally` ran when returning `StreamingResponse`, before bytes finished — breaking `OLLAMA_MAX_PARALLEL` and live chunk broadcast.
+- **Related Files**: `src/smart_proxy.py`, `src/stream_tap.py`, `src/database.py`, `static/dashboard/app.js`, `docs/changelog/v4.5_PERFORMANCE_STREAMING_AND_DB.md`
 
 ---

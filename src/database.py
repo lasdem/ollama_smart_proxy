@@ -69,6 +69,10 @@ class RequestLog(Base):
     __table_args__ = (
         Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
         Index('ix_timestamp_model', 'timestamp_received', 'model_name'),
+        # query_db: time range + sort by completed (dashboard "recent")
+        Index('ix_tsrecv_tcomp', 'timestamp_received', 'timestamp_completed'),
+        # query_db: status filter + time (e.g. completed,error + from_time)
+        Index('ix_status_tsrecv', 'status', 'timestamp_received'),
     )
 
     def __repr__(self):
@@ -159,12 +163,14 @@ class DatabaseConnection:
                     db_path.parent.mkdir(parents=True, exist_ok=True)
                     logger.info(f"Created database directory: {db_path.parent}")
             
+            pool_size = int(os.getenv("DB_POOL_SIZE", "10"))
+            max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "20"))
             # Create engine
             self.engine = create_engine(
                 connection_string,
                 echo=os.getenv("DB_ECHO", "false").lower() == "true",
-                pool_size=10,
-                max_overflow=20,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
                 pool_pre_ping=True
             )
             
@@ -215,6 +221,14 @@ class DatabaseConnection:
                     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_timestamp_model ON request_logs (timestamp_received, model_name)"))
                     conn.commit()
                     logger.info("Added composite index ix_timestamp_model")
+                if "ix_tsrecv_tcomp" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tsrecv_tcomp ON request_logs (timestamp_received, timestamp_completed)"))
+                    conn.commit()
+                    logger.info("Added composite index ix_tsrecv_tcomp")
+                if "ix_status_tsrecv" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_status_tsrecv ON request_logs (status, timestamp_received)"))
+                    conn.commit()
+                    logger.info("Added composite index ix_status_tsrecv")
         except Exception as e:
             logger.warning("Migration add columns failed (may already exist): %s", e)
     

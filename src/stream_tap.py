@@ -152,6 +152,6 @@ async def tee_stream(
             try:
                 result = on_done(request_id, full_content, full_thinking)
                 if asyncio.iscoroutine(result):
-                    asyncio.get_running_loop().create_task(result)
+                    await result
             except Exception as e:
                 logger.warning("stream_tap on_done failed: %s", e)

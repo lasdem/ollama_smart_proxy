@@ -23,7 +23,6 @@ from stream_tap import tee_stream
 from live_broadcaster import get_broadcaster
 
 import httpx
-from starlette.background import BackgroundTask
 
 # Database and data access imports
 from database import init_db, get_db, RequestLog
@@ -86,6 +85,9 @@ init_repositories()
 load_dotenv()
 
 request_repo = get_request_log_repo()
+
+# Shared HTTP client for Ollama (reuse connections; created in app lifespan)
+ollama_http_client: Optional[httpx.AsyncClient] = None
 
 # We don't need endpoint type differentiation anymore - all requests forwarded as-is
 
@@ -316,7 +318,11 @@ async def enqueue_request(request: Request, path: str):
             prefix = [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages[:-1] if isinstance(m, dict)]
             if prefix:
                 incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
-                existing = request_repo.get_request_by_ip_and_outgoing_fingerprint(client_ip, incoming_fp)
+                existing = await asyncio.to_thread(
+                    request_repo.get_request_by_ip_and_outgoing_fingerprint,
+                    client_ip,
+                    incoming_fp,
+                )
                 if existing and existing.session_id:
                     session_id = existing.session_id
     except Exception as e:
@@ -464,11 +470,22 @@ async def queue_worker():
         )
         asyncio.create_task(process_request(selected_request, priority_score))
 
+
+async def _release_active_slot(req: QueuedRequest) -> None:
+    """Remove request from active_requests and decrement tracker; idempotent."""
+    async with queue_lock:
+        if req.request_id not in active_requests:
+            return
+        del active_requests[req.request_id]
+    tracker.remove_request(req.ip, req.model_name)
+
+
 async def process_request(request: QueuedRequest, priority_score: int):
     """Forward raw HTTP request to Ollama and stream response back"""
     start_time = time.time()
     model_was_loaded = tracker.is_model_loaded(request.model_name)
-    
+    streaming_handoff = False
+
     # Calculate initial queue wait
     queue_wait = start_time - request.timestamp
 
@@ -479,32 +496,31 @@ async def process_request(request: QueuedRequest, priority_score: int):
         request.ip,
         request.model_name,
         "processing",
-        0, 
+        0,
         priority_score,
         timestamp_started=datetime.utcnow(),
         queue_wait_seconds=queue_wait
     )
-    
-    try:
-        # Forward request to Ollama as-is
-        base_url = OLLAMA_API_BASE.rstrip("/")
-        target_url = f"{base_url}/{request.path.lstrip('/')}"
-        
-        if request.raw_request.url.query:
-            target_url += f"?{request.raw_request.url.query}"
 
+    try:
+        # Forward request to Ollama as-is (shared httpx client; relative path + base_url)
         # Filter headers
         headers = dict(request.raw_request.headers)
         headers.pop("host", None)
         headers.pop("content-length", None)
 
-        client = httpx.AsyncClient(base_url=base_url, timeout=REQUEST_TIMEOUT)
+        client = ollama_http_client
+        if client is None:
+            raise RuntimeError("Ollama HTTP client not initialized (lifespan not started)")
 
         try:
-            # Build and send request with the raw body bytes (preserves exact formatting)
+            # Relative path so shared client base_url applies (connection reuse)
+            rel_path = request.path.lstrip("/")
+            if request.raw_request.url.query:
+                rel_path = f"{rel_path}?{request.raw_request.url.query}"
             req = client.build_request(
                 request.raw_request.method,
-                target_url,
+                rel_path,
                 headers=headers,
                 content=request.raw_body  # Use the raw body bytes
             )
@@ -537,39 +553,54 @@ async def process_request(request: QueuedRequest, priority_score: int):
             )
 
             async def on_stream_done(rid: str, full_content: str, full_thinking: str):
-                total_duration = time.time() - request.timestamp
-                processing_time = time.time() - start_time
-                response_text_val = full_content if full_content else f"[HTTP {status_code}]"
-                outgoing_fp = None
-                if status == "completed" and request.body.get("messages") and full_content is not None:
-                    msgs = request.body.get("messages") or []
-                    if isinstance(msgs, list):
-                        out_state = [{"role": (m.get("role") or ""), "content": (m.get("content") or "")} for m in msgs if isinstance(m, dict)]
-                        out_state.append({"role": "assistant", "content": full_content})
-                        outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
-                await asyncio.to_thread(
-                    request_repo.log_request,
-                    request.request_id,
-                    request.ip,
-                    request.model_name,
-                    status,
-                    total_duration,
-                    priority_score,
-                    response_text=response_text_val,
-                    processing_time_seconds=processing_time,
-                    outgoing_conversation_fingerprint=outgoing_fp,
-                    endpoint=request.path,
-                    user_agent=request.raw_request.headers.get("user-agent"),
-                    thinking_text=full_thinking or None,
-                )
-                await broadcaster.request_completed(rid, status)
+                try:
+                    total_duration = time.time() - request.timestamp
+                    processing_time = time.time() - start_time
+                    response_text_val = full_content if full_content else f"[HTTP {status_code}]"
+                    outgoing_fp = None
+                    if status == "completed" and request.body.get("messages") and full_content is not None:
+                        msgs = request.body.get("messages") or []
+                        if isinstance(msgs, list):
+                            out_state = [{"role": (m.get("role") or ""), "content": (m.get("content") or "")} for m in msgs if isinstance(m, dict)]
+                            out_state.append({"role": "assistant", "content": full_content})
+                            outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
+                    await asyncio.to_thread(
+                        request_repo.log_request,
+                        request.request_id,
+                        request.ip,
+                        request.model_name,
+                        status,
+                        total_duration,
+                        priority_score,
+                        response_text=response_text_val,
+                        processing_time_seconds=processing_time,
+                        outgoing_conversation_fingerprint=outgoing_fp,
+                        endpoint=request.path,
+                        user_agent=request.raw_request.headers.get("user-agent"),
+                        thinking_text=full_thinking or None,
+                    )
+                    await broadcaster.request_completed(rid, status)
+                    if is_error:
+                        stats["failed_requests"] += 1
+                    else:
+                        stats["completed_requests"] += 1
+                    logger.info(
+                        f"[{request.request_id}]",
+                        extra={
+                            "event": "request_completed" if not is_error else "request_failed",
+                            "request_id": request.request_id,
+                            "duration_seconds": round(total_duration, 2),
+                            "status_code": status_code
+                        }
+                    )
+                finally:
+                    await _release_active_slot(request)
 
             def on_chunk(rid: str, delta: str, kind: str = "content"):
                 loop = asyncio.get_running_loop()
                 loop.create_task(broadcaster.chunk(rid, delta, kind))
 
-            # Tee stream: forward raw bytes to client and accumulate response text for logging + live broadcast
-            body_iter = tee_stream(
+            tee = tee_stream(
                 r.aiter_raw(),
                 request.path,
                 request.request_id,
@@ -578,12 +609,20 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 chunk_timeout=STREAM_CHUNK_TIMEOUT,
             )
 
-            # Create streaming response
+            async def streaming_body():
+                try:
+                    async for chunk in tee:
+                        yield chunk
+                finally:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
             response = StreamingResponse(
-                body_iter,
+                streaming_body(),
                 status_code=status_code,
                 headers=dict(r.headers),
-                background=BackgroundTask(r.aclose)
             )
 
             # If model wasn't loaded before, trigger immediate VRAM poll
@@ -597,35 +636,17 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     )
                 asyncio.create_task(delayed_poll())
 
-            # Set Result
+            streaming_handoff = True
             if not request.future.done():
                 request.future.set_result(response)
-            processing_time = time.time() - start_time
-            total_duration = time.time() - request.timestamp
 
-            if is_error:
-                stats["failed_requests"] += 1
-            else:
-                stats["completed_requests"] += 1
+        except Exception:
+            raise
 
-            logger.info(
-                f"[{request.request_id}]",
-                extra={
-                    "event": "request_completed" if not is_error else "request_failed",
-                    "request_id": request.request_id,
-                    "duration_seconds": round(total_duration, 2),
-                    "status_code": r.status_code
-                }
-            )
-            
-        except Exception as http_error:
-            await client.aclose()
-            raise http_error
-        
     except Exception as e:
         processing_time = time.time() - start_time
         total_duration = time.time() - request.timestamp
-        
+
         await asyncio.to_thread(
             request_repo.log_request,
             request.request_id,
@@ -639,22 +660,19 @@ async def process_request(request: QueuedRequest, priority_score: int):
             endpoint=request.path,
             user_agent=request.raw_request.headers.get("user-agent"),
         )
-        
+
         logger.exception(f"[{request.request_id}] Request Failed")
         if not request.future.done():
             request.future.set_exception(e)
         stats["failed_requests"] += 1
     finally:
-        async with queue_lock:
-            if request.request_id in active_requests:
-                del active_requests[request.request_id]
-        tracker.remove_request(request.ip, request.model_name)
-        # Safety net: ensure broadcaster always cleans up (idempotent)
-        try:
-            _broadcaster = get_broadcaster()
-            await _broadcaster.request_completed(request.request_id, "error")
-        except Exception:
-            pass
+        if not streaming_handoff:
+            await _release_active_slot(request)
+            try:
+                _broadcaster = get_broadcaster()
+                await _broadcaster.request_completed(request.request_id, "error")
+            except Exception:
+                pass
 
 async def stale_request_sweeper():
     """Background task that periodically cleans up stale/orphaned requests."""
@@ -755,7 +773,19 @@ async def log_retention_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global ollama_http_client
     # Startup
+    base = OLLAMA_API_BASE.rstrip("/")
+    ollama_http_client = httpx.AsyncClient(
+        base_url=base + "/",
+        timeout=httpx.Timeout(REQUEST_TIMEOUT),
+        limits=httpx.Limits(max_keepalive_connections=32, max_connections=100),
+        http2=False,
+    )
+    logger.info(
+        "Ollama shared HTTP client ready",
+        extra={"event": "proxy_startup", "ollama_base": base},
+    )
     vram_monitor.start()
     asyncio.create_task(queue_worker())
     asyncio.create_task(stale_request_sweeper())
@@ -787,6 +817,12 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     vram_monitor.stop()
+    if ollama_http_client is not None:
+        try:
+            await ollama_http_client.aclose()
+        except Exception as e:
+            logger.warning("Error closing Ollama HTTP client: %s", e)
+        ollama_http_client = None
     
     logger.info("Smart Proxy shut down", extra={"event": "proxy_shutdown"})
 

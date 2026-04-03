@@ -484,22 +484,51 @@ async def proxy_analytics(
     start_time = end_time - timedelta(hours=hours)
     
     try:
+        # Run independent SQL aggregations in parallel (thread pool) to cut wall-clock latency.
+        (
+            r_model,
+            r_ip,
+            r_avg,
+            r_prio,
+            r_err,
+            r_err_ip,
+            r_perf_m,
+            r_perf_ip,
+            r_bunch,
+            r_time,
+        ) = await asyncio.gather(
+            asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time),
+            asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit),
+            asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time),
+            asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by),
+            asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by),
+            asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip"),
+            asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name"),
+            asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip"),
+            asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60),
+            asyncio.to_thread(
+                analytics_repo.get_requests_over_time,
+                "hour",
+                start_time,
+                end_time,
+            ),
+        )
         analytics_data = {
             "time_range": {
                 "start": start_time.isoformat(),
                 "end": end_time.isoformat(),
                 "hours": hours
             },
-            "request_count_by_model": analytics_repo.get_request_count_by_model(start_time, end_time),
-            "request_count_by_ip": analytics_repo.get_request_count_by_ip(start_time, end_time, limit),
-            "average_duration_by_model": analytics_repo.get_average_duration_by_model(start_time, end_time),
-            "priority_score_distribution": analytics_repo.get_priority_score_distribution(start_time, end_time, group_by),
-            "error_rate_analysis": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by),
-            "error_rate_by_ip": analytics_repo.get_error_rate_analysis(start_time, end_time, group_by='ip'),
-            "perf_by_model": analytics_repo.get_performance_stats(start_time, end_time, group_by='model_name'),
-            "perf_by_ip": analytics_repo.get_performance_stats(start_time, end_time, group_by='ip'),
-            "model_bunching_detection": analytics_repo.get_model_bunching_detection(start_time, end_time, time_window_seconds=60),
-            "requests_over_time": analytics_repo.get_requests_over_time(interval='hour', start_time=start_time, end_time=end_time)
+            "request_count_by_model": r_model,
+            "request_count_by_ip": r_ip,
+            "average_duration_by_model": r_avg,
+            "priority_score_distribution": r_prio,
+            "error_rate_analysis": r_err,
+            "error_rate_by_ip": r_err_ip,
+            "perf_by_model": r_perf_m,
+            "perf_by_ip": r_perf_ip,
+            "model_bunching_detection": r_bunch,
+            "requests_over_time": r_time,
         }
         
         _analytics_cache[cache_key] = (analytics_data, time.time())

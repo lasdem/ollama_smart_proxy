@@ -82,7 +82,6 @@ async def test_tee_stream_calls_on_done_with_accumulated_text():
     it = tee_stream(raw(), "/api/chat", "req1", on_done=on_done)
     async for _ in it:
         pass
-    await asyncio.sleep(0.15)
     assert len(done_result) == 1
     assert done_result[0][0] == "req1"
     assert done_result[0][1] == "ab"
