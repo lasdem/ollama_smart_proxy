@@ -57,6 +57,10 @@ curl -X POST http://localhost:8003/v1/chat/completions \
 curl http://localhost:8003/proxy/health | jq
 ```
 
+### Browser dashboard
+
+Open `http://<host>:<port>/proxy/dashboard`. Static assets are served with `Cache-Control: no-store`, and `index.html` references `app.css` / `app.js` with a `?v=` query so updates load after deploys. If the phone still shows an old UI, hard-refresh the tab (pull-to-refresh) or clear cached data for that site. Histogram and admin APIs need a valid **admin key** (`?key=` in the URL or **Set key** on the Admin tab); without it, charts stay empty.
+
 ## How It Works
 
 ### Priority Scoring

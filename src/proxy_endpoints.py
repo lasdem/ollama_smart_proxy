@@ -32,6 +32,15 @@ def _analytics_parallel_enabled() -> bool:
     return str(raw).lower() in ("1", "true", "yes")
 # Dashboard static files: project root / static / dashboard
 _DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "static" / "dashboard"
+# Prevent stale CSS/JS on phones (browsers cache aggressively without these).
+_DASHBOARD_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+}
+
+
+def _dashboard_file_response(path: Path) -> FileResponse:
+    return FileResponse(path, headers=dict(_DASHBOARD_CACHE_HEADERS))
 
 router = APIRouter(prefix="/proxy")
 
@@ -109,7 +118,7 @@ def _serve_dashboard_file(path: str):
     except ValueError:
         return None
     if full.is_file():
-        return FileResponse(full)
+        return _dashboard_file_response(full)
     return None
 
 
@@ -123,7 +132,7 @@ async def proxy_dashboard(request: Request):
     index = _DASHBOARD_DIR / "index.html"
     if not index.is_file():
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    return FileResponse(index)
+    return _dashboard_file_response(index)
 
 
 @router.get("/dashboard/{path:path}")

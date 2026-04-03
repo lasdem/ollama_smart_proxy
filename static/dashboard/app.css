@@ -7,7 +7,7 @@ body { font-family: system-ui, sans-serif; margin: 0; background: #1a1a1a; color
 .auth button { padding: 0.35rem 0.75rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; }
 #authStatus { font-size: 0.85rem; color: #888; }
 .tabs { display: flex; gap: 0; padding: 0 1rem; background: #252525; border-bottom: 1px solid #333; }
-.tabs button { padding: 0.6rem 1rem; background: transparent; border: none; color: #aaa; cursor: pointer; border-bottom: 2px solid transparent; }
+.tabs button { padding: 0.6rem 1rem; background: transparent; border: none; color: #aaa; cursor: pointer; border-bottom: 2px solid transparent; touch-action: manipulation; }
 .tabs button:hover { color: #fff; }
 .tabs button.active { color: #0af; border-bottom-color: #0af; }
 main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
@@ -155,8 +155,12 @@ td a:hover { text-decoration: underline; }
 
 /* Detail modal */
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal.modal-confirm { z-index: 200; }
 .modal.hidden { display: none; }
 .modal-content { background: #252525; border: 1px solid #444; border-radius: 8px; padding: 1.5rem; max-width: 90vw; max-height: 85vh; overflow: auto; position: relative; min-width: 40vw; }
+.confirm-modal-content { min-width: min(100%, 22rem); }
+.confirm-modal-msg { margin: 0; color: #ccc; line-height: 1.45; font-size: 0.95rem; }
+.confirm-modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; flex-wrap: wrap; }
 .modal-close { position: absolute; top: 0.5rem; right: 0.5rem; background: transparent; border: none; color: #888; font-size: 1.5rem; cursor: pointer; }
 .detail-meta { font-size: 0.85rem; color: #888; margin-bottom: 1rem; }
 .detail-meta-table { width: 100%; border-collapse: collapse; margin-bottom: 0.5rem; }
@@ -170,7 +174,7 @@ td a:hover { text-decoration: underline; }
 /* Admin tab */
 .admin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 @media (max-width: 700px) { .admin-grid { grid-template-columns: 1fr; } }
-.admin-btn { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+.admin-btn { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .admin-btn:hover { filter: brightness(1.15); }
 .admin-btn-danger { background: #c44; color: #fff; }
 .admin-btn-danger:hover { filter: brightness(1.15); }

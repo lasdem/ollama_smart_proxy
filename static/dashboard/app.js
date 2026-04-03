@@ -34,6 +34,39 @@
   });
   setAuthStatus(!!getKey());
 
+  /** Replace window.confirm (unreliable on some mobile browsers) with an inline modal */
+  function openConfirmModal(message, onConfirm) {
+    var modal = document.getElementById('confirmModal');
+    var msgEl = document.getElementById('confirmMessage');
+    var ok = document.getElementById('confirmOk');
+    var cancel = document.getElementById('confirmCancel');
+    if (!modal || !msgEl || !ok || !cancel) {
+      if (window.confirm(message)) onConfirm();
+      return;
+    }
+    msgEl.textContent = message;
+    modal.classList.remove('hidden');
+    function cleanup() {
+      modal.classList.add('hidden');
+      ok.removeEventListener('click', onOk);
+      cancel.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+    }
+    function onOk() {
+      cleanup();
+      onConfirm();
+    }
+    function onCancel() {
+      cleanup();
+    }
+    function onBackdrop(e) {
+      if (e.target === modal) onCancel();
+    }
+    ok.addEventListener('click', onOk);
+    cancel.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  }
+
   /* ---------- Helpers ---------- */
   function escapeHtml(s) {
     if (s == null) return '';
@@ -1169,8 +1202,9 @@
   if (clearStaleBtn) clearStaleBtn.addEventListener('click', function () { adminPost(API_BASE + '/clear-stale'); });
   var clearQueueBtn = document.getElementById('adminClearQueue');
   if (clearQueueBtn) clearQueueBtn.addEventListener('click', function () {
-    if (!window.confirm('Remove all jobs from the waiting queue? Active streams are not stopped.')) return;
-    adminPost(API_BASE + '/clear-queue', undefined, function () { loadHome(); });
+    openConfirmModal('Remove all jobs from the waiting queue? Active streams are not stopped.', function () {
+      adminPost(API_BASE + '/clear-queue', undefined, function () { loadHome(); });
+    });
   });
   var adminStopRequestBtn = document.getElementById('adminStopRequest');
   if (adminStopRequestBtn) adminStopRequestBtn.addEventListener('click', function () {
@@ -1188,7 +1222,8 @@
     var logs = document.getElementById('purgeRequestLogs') && document.getElementById('purgeRequestLogs').checked;
     var roll = document.getElementById('purgeAnalyticsRollups') && document.getElementById('purgeAnalyticsRollups').checked;
     if (!logs && !roll) { showAdminResult('Select at least one: request logs and/or analytics rollups'); return; }
-    if (!window.confirm('Permanently delete selected data?')) return;
-    adminPost(API_BASE + '/admin/db/purge', { request_logs: !!logs, analytics_rollups: !!roll });
+    openConfirmModal('Permanently delete selected data? This cannot be undone.', function () {
+      adminPost(API_BASE + '/admin/db/purge', { request_logs: !!logs, analytics_rollups: !!roll });
+    });
   });
 })();

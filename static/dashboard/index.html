@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
   <base href="/proxy/dashboard/">
   <title>Proxy Monitor — Ollama Smart Proxy</title>
-  <link rel="stylesheet" href="app.css">
+  <!-- Bump ?v= when changing CSS so phones pick up updates even if cache misbehaves -->
+  <link rel="stylesheet" href="app.css?v=6">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -206,6 +209,15 @@
       <pre id="adminResult" style="margin-top:1rem;padding:0.75rem;background:#1a1a1a;border-radius:4px;font-size:0.85rem;max-height:20rem;overflow:auto;color:#ccc;display:none"></pre>
     </section>
   </main>
+  <div id="confirmModal" class="modal modal-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="confirmMessage">
+    <div class="modal-content confirm-modal-content">
+      <p id="confirmMessage" class="confirm-modal-msg"></p>
+      <div class="confirm-modal-actions">
+        <button type="button" id="confirmCancel" class="back-btn">Cancel</button>
+        <button type="button" id="confirmOk" class="admin-btn admin-btn-danger">Confirm</button>
+      </div>
+    </div>
+  </div>
   <div id="detailModal" class="modal hidden">
     <div class="modal-content">
       <button class="modal-close" id="closeDetail">&times;</button>
@@ -218,6 +230,6 @@
       <pre id="detailRaw" class="detail-body hidden"></pre>
     </div>
   </div>
-  <script src="app.js"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
