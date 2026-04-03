@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 # Analytics response cache: { (hours, group_by, limit): (result_dict, timestamp) }
 _analytics_cache: dict = {}
 ANALYTICS_CACHE_TTL = int(os.getenv("ANALYTICS_CACHE_TTL", "60"))  # seconds
+
+
+def _analytics_parallel_enabled() -> bool:
+    """Read at request time so .env (loaded after imports) is respected."""
+    db_type = os.getenv("DB_TYPE", "sqlite").lower()
+    default_parallel = "false" if db_type == "sqlite" else "true"
+    raw = os.getenv("ANALYTICS_PARALLEL")
+    if raw is None or str(raw).strip() == "":
+        raw = default_parallel
+    return str(raw).lower() in ("1", "true", "yes")
 # Dashboard static files: project root / static / dashboard
 _DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "static" / "dashboard"
 
@@ -484,35 +494,52 @@ async def proxy_analytics(
     start_time = end_time - timedelta(hours=hours)
     
     try:
-        # Run independent SQL aggregations in parallel (thread pool) to cut wall-clock latency.
-        (
-            r_model,
-            r_ip,
-            r_avg,
-            r_prio,
-            r_err,
-            r_err_ip,
-            r_perf_m,
-            r_perf_ip,
-            r_bunch,
-            r_time,
-        ) = await asyncio.gather(
-            asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time),
-            asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit),
-            asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time),
-            asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by),
-            asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by),
-            asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip"),
-            asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name"),
-            asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip"),
-            asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60),
-            asyncio.to_thread(
+        # Independent SQL aggregations: parallel (fast on Postgres) or sequential (safer on SQLite).
+        if _analytics_parallel_enabled():
+            (
+                r_model,
+                r_ip,
+                r_avg,
+                r_prio,
+                r_err,
+                r_err_ip,
+                r_perf_m,
+                r_perf_ip,
+                r_bunch,
+                r_time,
+            ) = await asyncio.gather(
+                asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time),
+                asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit),
+                asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time),
+                asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by),
+                asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by),
+                asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip"),
+                asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name"),
+                asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip"),
+                asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60),
+                asyncio.to_thread(
+                    analytics_repo.get_requests_over_time,
+                    "hour",
+                    start_time,
+                    end_time,
+                ),
+            )
+        else:
+            r_model = await asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time)
+            r_ip = await asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit)
+            r_avg = await asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time)
+            r_prio = await asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by)
+            r_err = await asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by)
+            r_err_ip = await asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip")
+            r_perf_m = await asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name")
+            r_perf_ip = await asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip")
+            r_bunch = await asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60)
+            r_time = await asyncio.to_thread(
                 analytics_repo.get_requests_over_time,
                 "hour",
                 start_time,
                 end_time,
-            ),
-        )
+            )
         analytics_data = {
             "time_range": {
                 "start": start_time.isoformat(),

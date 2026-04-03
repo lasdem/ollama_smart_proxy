@@ -12,6 +12,18 @@ Each entry should include:
 
 ---
 
+## 2026-04-03
+
+### v4.7 Proxy stability (httpx lifecycle, deferred stream completion, analytics gating)
+- **Topic**: Restore reliable streaming and queue slots after v4.5/v4.6 performance changes; avoid shared httpx client regressions and SQLite lock pressure from parallel analytics.
+- **Summary**:
+  - Replaced shared `httpx.AsyncClient` with per-request clients and full upstream URLs; close `StreamResponse` and client after the body generator finishes; cleanup on send/processing errors.
+  - Post-stream logging and `_release_active_slot` run in a background task so `tee_stream` teardown is not blocked by DB I/O.
+  - `/proxy/analytics` uses parallel `gather` or sequential queries based on `_analytics_parallel_enabled()` (defaults: serial for sqlite, parallel for other DB types).
+- **Related Files**: `src/smart_proxy.py`, `src/proxy_endpoints.py`, `.env.example`, `docs/changelog/v4.7_PROXY_STABILITY.md`
+
+---
+
 ## 2026-02-11
 
 ### Architecture review and ARCHITECTURE.md update

@@ -3,6 +3,7 @@
 ---
 
 ## Done
+- [x] v4.7: Proxy stability — per-request httpx to Ollama, deferred post-stream DB/slot work, optional serial analytics on SQLite (`ANALYTICS_PARALLEL`) (see changelog/v4.7_PROXY_STABILITY.md)
 - [x] v4.6: Shared Ollama httpx client, parallel analytics queries, non-blocking session DB lookup, tunable DB pool, lean `query_db` fields in dashboard (see changelog/v4.6_PERFORMANCE_SNAPPY.md)
 - [x] v4.5: Performance plan — streaming cleanup after tee_stream, httpx close after stream, DB indexes for query_db, dashboard WS throttle + assistant row map (see changelog/v4.5_PERFORMANCE_STREAMING_AND_DB.md)
 - [x] v4.4: Realtime dashboard fix — stop thread DOM rebuild during streaming, concurrent broadcast, reduced debounce, tab-switch auto-refresh (see changelog/v4.4_REALTIME_FIX.md)
