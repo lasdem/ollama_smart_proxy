@@ -165,7 +165,8 @@ class RequestLogRepository:
             
             # Check if request log already exists
             request_log = session.query(RequestLog).filter_by(request_id=request_id).first()
-            
+            prev_status = request_log.status if request_log else None
+
             if request_log:
                 # Update existing request log
                 request_log.status = status
@@ -226,7 +227,42 @@ class RequestLogRepository:
             
             session.commit()
             session.refresh(request_log)
-            
+
+            try:
+                from rollup_ops import (
+                    apply_rollups_for_new_request,
+                    apply_rollups_for_error_transition,
+                    apply_rollups_for_completed_transition,
+                )
+
+                ts = request_log.timestamp_received
+                if prev_status is None:
+                    apply_rollups_for_new_request(
+                        self.db,
+                        ts,
+                        model_name,
+                        source_ip,
+                        request_log.status,
+                        queue_wait_seconds,
+                        processing_time_seconds,
+                        duration_seconds,
+                    )
+                else:
+                    if prev_status != "error" and request_log.status == "error":
+                        apply_rollups_for_error_transition(self.db, ts, model_name, source_ip)
+                    if prev_status != "completed" and request_log.status == "completed":
+                        apply_rollups_for_completed_transition(
+                            self.db,
+                            ts,
+                            model_name,
+                            source_ip,
+                            queue_wait_seconds,
+                            processing_time_seconds,
+                            duration_seconds,
+                        )
+            except Exception as rollup_e:
+                logger.warning("Analytics rollup update skipped: %s", rollup_e)
+
             return request_log
         except Exception as e:
             session.rollback()
@@ -366,6 +402,32 @@ class RequestLogRepository:
 
 
 class AnalyticsRepository:
+    """Repository for analytics data access"""
+
+    def __init__(self):
+        self.analytics = get_analytics()
+
+    def try_home_analytics_from_rollups(
+        self, start_time: datetime, end_time: datetime, limit: int
+    ) -> Optional[Dict[str, Any]]:
+        """Return Home dashboard payload from precomputed rollups, or None if unavailable."""
+        try:
+            return self.analytics.build_home_analytics_from_rollups(start_time, end_time, limit)
+        except Exception as e:
+            logger.warning("Rollup analytics unavailable, falling back to raw SQL: %s", e)
+            return None
+
+    def get_histogram(self, view: str, metric: str, top_n: int) -> Optional[Dict[str, Any]]:
+        if metric not in ("requests", "queue_wait", "processing", "duration", "error_rate"):
+            metric = "requests"
+        if view not in ("hourly", "daily"):
+            view = "hourly"
+        try:
+            return self.analytics.build_histogram_series(view, metric, top_n)
+        except Exception as e:
+            logger.warning("Histogram query failed: %s", e)
+            return None
+
     def get_error_rate_analysis(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
         Get error rate analysis grouped by model or time
@@ -377,10 +439,6 @@ class AnalyticsRepository:
             List[Dict]: Error rate stats
         """
         return self.analytics.get_error_rate_analysis(start_time, end_time, group_by)
-    """Repository for analytics data access"""
-    
-    def __init__(self):
-        self.analytics = get_analytics()
     
     def get_request_count_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
         """
@@ -421,19 +479,6 @@ class AnalyticsRepository:
         """
         return self.analytics.get_performance_stats(start_time, end_time, group_by)
 
-    def get_average_duration_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        """
-        Get average duration by model
-        
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            
-        Returns:
-            List[Dict]: List of model duration statistics
-        """
-        return self.analytics.get_average_duration_by_model(start_time, end_time)
-    
     def get_token_usage_stats(self, start_time: datetime, end_time: datetime) -> Dict[str, Any]:
         """
         Get token usage statistics
@@ -446,46 +491,6 @@ class AnalyticsRepository:
             Dict: Token usage statistics
         """
         return self.analytics.get_token_usage_stats(start_time, end_time)
-    
-    def get_requests_over_time(self, interval: str = 'hour', start_time: datetime = None, end_time: datetime = None) -> List[Dict[str, Any]]:
-        """
-        Get request count over time
-        
-        Args:
-            interval: Time interval ('hour', 'day', 'week')
-            start_time: Start time for query
-            end_time: End time for query
-            
-        Returns:
-            List[Dict]: Request count over time
-        """
-        return self.analytics.get_requests_over_time(interval, start_time, end_time)
-    
-    def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
-        """
-        Get priority score distribution (histogram, avg, min, max) grouped by model or time
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            group_by: 'model_name' or 'hour'
-        Returns:
-            List[Dict]: Distribution stats
-        """
-        return self.analytics.get_priority_score_distribution(start_time, end_time, group_by)
-
-    def get_model_bunching_detection(self, start_time: datetime, end_time: datetime, time_window_seconds: int = 60) -> List[Dict[str, Any]]:
-        """
-        Detect model bunching - when multiple requests for the same model arrive close together
-        
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            time_window_seconds: Time window in seconds to detect bunching (default: 60s)
-            
-        Returns:
-            List[Dict]: Model bunching statistics
-        """
-        return self.analytics.get_model_bunching_detection(start_time, end_time, time_window_seconds)
 
 
 # Global repository instances

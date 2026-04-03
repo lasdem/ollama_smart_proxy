@@ -194,8 +194,7 @@ python scripts/admin_dashboard.py --once
 
 **Features**:
 - Live health, VRAM, and queue status
-- Historical analytics (models, IPs, errors, priorities)
-- Model bunching detection
+- Historical analytics (models, IPs, errors, performance)
 - Optimized for 1080p terminal
 
 See [scripts/README_DASHBOARD.md](scripts/README_DASHBOARD.md) for details.
@@ -285,11 +284,10 @@ print(repo.get_request_count_by_model(start, end))
 
 **Available analytics**:
 - Request counts by model/IP
-- Average duration by model
-- Priority score distribution
-- Error rate analysis
-- Model bunching detection (identifies request clustering)
-- Requests over time
+- Error rate analysis (by model, IP, or hour)
+- Performance stats (avg queue wait and processing by model/IP)
+- Precomputed rollups updated on each request; `/proxy/analytics` can use rollups for long windows (`ANALYTICS_FROM_ROLLUPS_HOURS_THRESHOLD`)
+- `/proxy/analytics/histogram` — time series (hourly ~7d or daily ~90d) for requests, latency, and error rate
 
 See [docs/DATABASE_INTEGRATION.md](docs/DATABASE_INTEGRATION.md) for schema and queries.
 
@@ -389,7 +387,7 @@ ollama_smart_proxy/
 
 ### v3.5 (2025-12-20)
 - ✅ Database integration (SQLite/PostgreSQL)
-- ✅ Analytics queries (bunching, errors, distributions)
+- ✅ Analytics queries (counts, errors, performance, histogram rollups)
 - ✅ Fallback logging mechanism
 - ✅ Docker deployment ready
 

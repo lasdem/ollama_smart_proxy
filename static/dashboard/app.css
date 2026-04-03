@@ -159,3 +159,36 @@ td a:hover { text-decoration: underline; }
 .admin-btn-danger { background: #c44; color: #fff; }
 .admin-btn-danger:hover { filter: brightness(1.15); }
 .conv-ws-indicator { font-size: 0.85rem; color: #888; }
+
+/* Histogram tab */
+.hist-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+.hist-controls button { padding: 0.4rem 0.8rem; background: #0a7; color: #000; border: none; border-radius: 4px; cursor: pointer; }
+.hist-controls select { padding: 0.35rem 0.5rem; background: #333; border: 1px solid #444; color: #eee; border-radius: 4px; }
+.hist-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.hist-chart-card .hist-canvas-wrap { position: relative; height: 560px; padding: 0.5rem; }
+.hist-resize-handle {
+  flex-shrink: 0;
+  height: 10px;
+  margin: 0;
+  border-radius: 4px;
+  cursor: ns-resize;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  box-sizing: border-box;
+}
+.hist-resize-handle:hover { background: #383838; border-color: #0a7; }
+.hist-resize-handle::after {
+  content: '';
+  display: block;
+  width: 2rem;
+  height: 3px;
+  margin: 3px auto 0;
+  border-radius: 2px;
+  background: #666;
+}
+.admin-purge-label { display: block; margin-bottom: 0.35rem; font-size: 0.9rem; color: #ccc; cursor: pointer; }
+.admin-purge-label input { margin-right: 0.5rem; }

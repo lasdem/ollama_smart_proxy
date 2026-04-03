@@ -18,9 +18,9 @@ curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
   "$OLLAMA_HOST/proxy/analytics?hours=48&group_by=model_name" | jq '.request_count_by_model'
 
 echo ""
-echo "3. Get analytics grouped by hour for time-series analysis:"
+echo "3. Error rates grouped by hour:"
 curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
-  "$OLLAMA_HOST/proxy/analytics?hours=24&group_by=hour" | jq '.priority_score_distribution'
+  "$OLLAMA_HOST/proxy/analytics?hours=24&group_by=hour" | jq '.error_rate_analysis'
 
 echo ""
 echo "4. Get top 20 IPs by request count:"
@@ -28,14 +28,14 @@ curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
   "$OLLAMA_HOST/proxy/analytics?limit=20" | jq '.request_count_by_ip'
 
 echo ""
-echo "5. Check error rates by model:"
+echo "5. Precomputed histogram (hourly, last 7 days, requests by model/IP):"
 curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
-  "$OLLAMA_HOST/proxy/analytics" | jq '.error_rate_analysis'
+  "$OLLAMA_HOST/proxy/analytics/histogram?view=hourly&metric=requests&top_n=10" | jq '{view, metric, bucket_count: (.buckets|length)}'
 
 echo ""
-echo "6. Detect model bunching (requests arriving close together):"
+echo "6. Daily histogram (last 90 days):"
 curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
-  "$OLLAMA_HOST/proxy/analytics" | jq '.model_bunching_detection'
+  "$OLLAMA_HOST/proxy/analytics/histogram?view=daily&metric=error_rate&top_n=8" | jq '{view, metric}'
 
 # =============================================================================
 # 2. COMBINED MONITORING SCRIPT
@@ -100,9 +100,9 @@ echo "Analytics Summary (last 24h):"
 curl -s -H "X-Admin-Key: $PROXY_ADMIN_KEY" \
   "$OLLAMA_HOST/proxy/analytics?hours=24" | jq '{
   time_range: .time_range,
-  top_models: [.request_count_by_model[] | {model: .model_name, count: .request_count}] | .[0:3],
-  top_ips: [.request_count_by_ip[] | {ip: .source_ip, count: .request_count}] | .[0:3],
-  error_summary: [.error_rate_analysis[] | {group: .model_name, errors: .error_count, rate: .error_rate}] | .[0:3]
+  top_models: [.request_count_by_model[] | {model: .model, count: .request_count}] | .[0:3],
+  top_ips: [.request_count_by_ip[] | {ip: .ip_address, count: .request_count}] | .[0:3],
+  error_summary: [.error_rate_analysis[] | {group: .group, errors: .error_count, rate: .error_rate_percent}] | .[0:3]
 }'
 
 # =============================================================================

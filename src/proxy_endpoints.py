@@ -467,16 +467,10 @@ async def proxy_analytics(
     
     Query Parameters:
     - hours: Number of hours to look back (default: 24)
-    - group_by: Grouping method for distributions ('model_name' or 'hour', default: 'model_name')
+    - group_by: Grouping for error_rate_analysis ('model_name' or 'hour', default: 'model_name')
     - limit: Limit for top IP results (default: 10)
     
-    Returns comprehensive analytics including:
-    - Request counts by model and IP
-    - Average duration by model
-    - Priority score distribution
-    - Error rate analysis
-    - Model bunching detection
-    - Requests over time
+    Returns request counts, performance stats, and error rates (see docs).
     """
     _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
     
@@ -495,51 +489,48 @@ async def proxy_analytics(
     
     try:
         # Independent SQL aggregations: parallel (fast on Postgres) or sequential (safer on SQLite).
+        use_rollups = hours >= int(os.getenv("ANALYTICS_FROM_ROLLUPS_HOURS_THRESHOLD", "72"))
+        if use_rollups:
+            rollup_payload = await asyncio.to_thread(
+                analytics_repo.try_home_analytics_from_rollups, start_time, end_time, limit
+            )
+            if rollup_payload is not None:
+                rollup_payload = dict(rollup_payload)
+                rollup_payload.pop("source", None)
+                analytics_data = {
+                    "time_range": {
+                        "start": start_time.isoformat(),
+                        "end": end_time.isoformat(),
+                        "hours": hours,
+                    },
+                    **rollup_payload,
+                }
+                _analytics_cache[cache_key] = (analytics_data, time.time())
+                return analytics_data
+
         if _analytics_parallel_enabled():
             (
                 r_model,
                 r_ip,
-                r_avg,
-                r_prio,
                 r_err,
                 r_err_ip,
                 r_perf_m,
                 r_perf_ip,
-                r_bunch,
-                r_time,
             ) = await asyncio.gather(
                 asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time),
                 asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit),
-                asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time),
-                asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by),
                 asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by),
                 asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip"),
                 asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name"),
                 asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip"),
-                asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60),
-                asyncio.to_thread(
-                    analytics_repo.get_requests_over_time,
-                    "hour",
-                    start_time,
-                    end_time,
-                ),
             )
         else:
             r_model = await asyncio.to_thread(analytics_repo.get_request_count_by_model, start_time, end_time)
             r_ip = await asyncio.to_thread(analytics_repo.get_request_count_by_ip, start_time, end_time, limit)
-            r_avg = await asyncio.to_thread(analytics_repo.get_average_duration_by_model, start_time, end_time)
-            r_prio = await asyncio.to_thread(analytics_repo.get_priority_score_distribution, start_time, end_time, group_by)
             r_err = await asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, group_by)
             r_err_ip = await asyncio.to_thread(analytics_repo.get_error_rate_analysis, start_time, end_time, "ip")
             r_perf_m = await asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "model_name")
             r_perf_ip = await asyncio.to_thread(analytics_repo.get_performance_stats, start_time, end_time, "ip")
-            r_bunch = await asyncio.to_thread(analytics_repo.get_model_bunching_detection, start_time, end_time, 60)
-            r_time = await asyncio.to_thread(
-                analytics_repo.get_requests_over_time,
-                "hour",
-                start_time,
-                end_time,
-            )
         analytics_data = {
             "time_range": {
                 "start": start_time.isoformat(),
@@ -548,14 +539,10 @@ async def proxy_analytics(
             },
             "request_count_by_model": r_model,
             "request_count_by_ip": r_ip,
-            "average_duration_by_model": r_avg,
-            "priority_score_distribution": r_prio,
             "error_rate_analysis": r_err,
             "error_rate_by_ip": r_err_ip,
             "perf_by_model": r_perf_m,
             "perf_by_ip": r_perf_ip,
-            "model_bunching_detection": r_bunch,
-            "requests_over_time": r_time,
         }
         
         _analytics_cache[cache_key] = (analytics_data, time.time())
@@ -563,6 +550,54 @@ async def proxy_analytics(
     except Exception as e:
         logger.error(f"Failed to retrieve analytics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
+
+
+@router.get("/analytics/histogram")
+async def proxy_analytics_histogram(
+    request: Request,
+    view: str = "hourly",
+    metric: str = "requests",
+    top_n: int = 15,
+):
+    """
+    Precomputed time series from rollup tables (hourly last 7d or daily last 90d).
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    repo = get_analytics_repo()
+    data = await asyncio.to_thread(repo.get_histogram, view, metric, top_n)
+    if data is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Histogram unavailable (rollup tables missing or query error)",
+        )
+    return data
+
+
+class DbPurgePayload(BaseModel):
+    request_logs: bool = False
+    analytics_rollups: bool = False
+
+
+@router.post("/admin/db/purge")
+async def proxy_db_purge(payload: DbPurgePayload, request: Request):
+    """
+    Admin-only destructive purge. At least one of request_logs or analytics_rollups must be true.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    if not payload.request_logs and not payload.analytics_rollups:
+        raise HTTPException(
+            status_code=400,
+            detail="Select at least one target: request_logs and/or analytics_rollups",
+        )
+    from rollup_ops import purge_all_rollups, purge_all_request_logs
+
+    db = get_db()
+    result: dict = {}
+    if payload.analytics_rollups:
+        result["analytics_rollups_rows_deleted"] = purge_all_rollups(db)
+    if payload.request_logs:
+        result["request_logs_rows_deleted"] = purge_all_request_logs(db)
+    return result
 
 
 @router.websocket("/live")

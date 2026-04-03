@@ -3,6 +3,7 @@
 ---
 
 ## Done
+- [x] v4.8: Precomputed analytics rollups, histogram API + dashboard tab, admin DB purge, migration v4 backfill (see changelog/v4.8_ANALYTICS_ROLLUPS.md)
 - [x] v4.7.4: Dashboard — autoscroll thinking `<pre>` during streaming (see changelog/v4.7.4_THINKING_AUTOSCROLL.md)
 - [x] v4.7.3: stream_tap: extract top-level `thinking` for `/api/generate` (ollama run) (see changelog/v4.7.3_GENERATE_THINKING.md)
 - [x] v4.7.1: WebUI live thinking stream — DOM placeholder + stream_tap both fields per line (see changelog/v4.7.1_WEBUI_THINKING_STREAM.md)

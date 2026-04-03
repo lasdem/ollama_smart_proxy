@@ -79,6 +79,54 @@ class RequestLog(Base):
         return f"<RequestLog {self.request_id} - {self.status}>"
 
 
+class AnalyticsHourlyByModel(Base):
+    __tablename__ = "analytics_hourly_by_model"
+    bucket_hour = Column(DateTime, primary_key=True, nullable=False)
+    model_name = Column(String(255), primary_key=True, nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    sum_queue_wait_seconds = Column(Float, nullable=False, default=0.0)
+    sum_processing_seconds = Column(Float, nullable=False, default=0.0)
+    sum_duration_seconds = Column(Float, nullable=False, default=0.0)
+
+
+class AnalyticsHourlyByIp(Base):
+    __tablename__ = "analytics_hourly_by_ip"
+    bucket_hour = Column(DateTime, primary_key=True, nullable=False)
+    source_ip = Column(String(45), primary_key=True, nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    sum_queue_wait_seconds = Column(Float, nullable=False, default=0.0)
+    sum_processing_seconds = Column(Float, nullable=False, default=0.0)
+    sum_duration_seconds = Column(Float, nullable=False, default=0.0)
+
+
+class AnalyticsDailyByModel(Base):
+    __tablename__ = "analytics_daily_by_model"
+    bucket_day = Column(DateTime, primary_key=True, nullable=False)
+    model_name = Column(String(255), primary_key=True, nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    sum_queue_wait_seconds = Column(Float, nullable=False, default=0.0)
+    sum_processing_seconds = Column(Float, nullable=False, default=0.0)
+    sum_duration_seconds = Column(Float, nullable=False, default=0.0)
+
+
+class AnalyticsDailyByIp(Base):
+    __tablename__ = "analytics_daily_by_ip"
+    bucket_day = Column(DateTime, primary_key=True, nullable=False)
+    source_ip = Column(String(45), primary_key=True, nullable=False)
+    request_count = Column(Integer, nullable=False, default=0)
+    error_count = Column(Integer, nullable=False, default=0)
+    completed_count = Column(Integer, nullable=False, default=0)
+    sum_queue_wait_seconds = Column(Float, nullable=False, default=0.0)
+    sum_processing_seconds = Column(Float, nullable=False, default=0.0)
+    sum_duration_seconds = Column(Float, nullable=False, default=0.0)
+
+
 class DatabaseConnection:
     """Database connection manager"""
     
@@ -548,58 +596,6 @@ class AnalyticsQueryBuilder:
         finally:
             session.close()
 
-    def get_priority_score_distribution(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
-        """
-        Get priority score distribution (histogram, avg, min, max) grouped by model or time
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            group_by: 'model_name' or 'hour' (time bucket)
-        Returns:
-            List[Dict]: Distribution stats
-        """
-        try:
-            session = self.db.get_session()
-            if group_by == 'model_name':
-                group_col = 'model_name'
-            elif group_by == 'hour':
-                group_col = self.db._get_date_trunc_expr('hour')
-            else:
-                group_col = 'model_name'
-
-            result = session.execute(text(f"""
-                SELECT 
-                    {group_col} as group_key,
-                    COUNT(*) as count,
-                    AVG(priority_score) as avg_score,
-                    MIN(priority_score) as min_score,
-                    MAX(priority_score) as max_score
-                FROM request_logs
-                WHERE timestamp_received BETWEEN :start_time AND :end_time
-                    AND priority_score IS NOT NULL
-                GROUP BY group_key
-                ORDER BY count DESC
-            """), {
-                "start_time": start_time,
-                "end_time": end_time
-            }).fetchall()
-
-            return [
-                {
-                    "group": row[0],
-                    "count": row[1],
-                    "avg_score": row[2],
-                    "min_score": row[3],
-                    "max_score": row[4]
-                }
-                for row in result
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get priority score distribution: {e}")
-            raise
-        finally:
-            session.close()
-    
     def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
         Get performance statistics (wait time, processing time, total duration)
@@ -696,104 +692,6 @@ class AnalyticsQueryBuilder:
         finally:
             session.close()
     
-    def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
-        """
-        Get performance statistics (wait time, processing time, total duration)
-        
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            group_by: 'model_name' or 'ip'
-            
-        Returns:
-            List[Dict]: List of performance statistics
-        """
-        try:
-            session = self.db.get_session()
-            
-            if group_by == 'ip':
-                group_col = 'source_ip'
-            else:
-                group_col = 'model_name'
-            
-            result = session.execute(text(f"""
-                SELECT 
-                    {group_col} as group_key,
-                    AVG(queue_wait_seconds) as avg_wait,
-                    AVG(processing_time_seconds) as avg_proc,
-                    AVG(duration_seconds) as avg_total,
-                    COUNT(*) as count
-                FROM request_logs
-                WHERE timestamp_received BETWEEN :start_time AND :end_time
-                    AND status = 'completed'
-                GROUP BY group_key
-                ORDER BY avg_total DESC
-            """), {
-                "start_time": start_time,
-                "end_time": end_time
-            }).fetchall()
-            
-            return [
-                {
-                    "group": row[0],
-                    "avg_wait_seconds": row[1],
-                    "avg_processing_seconds": row[2],
-                    "avg_total_seconds": row[3],
-                    "count": row[4]
-                }
-                for row in result
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get performance stats: {e}")
-            raise
-        finally:
-            session.close()
-
-    def get_average_duration_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        """
-        Get average duration by model
-        
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            
-        Returns:
-            List[Dict]: List of model duration statistics
-        """
-        try:
-            session = self.db.get_session()
-            
-            result = session.execute(text("""
-                SELECT 
-                    model_name,
-                    AVG(duration_seconds) as avg_duration_ms,
-                    MIN(duration_seconds) as min_duration_ms,
-                    MAX(duration_seconds) as max_duration_ms
-                FROM request_logs
-                WHERE timestamp_received BETWEEN :start_time AND :end_time
-                    AND duration_seconds IS NOT NULL
-                GROUP BY model_name
-                ORDER BY avg_duration_ms DESC
-            """), {
-                "start_time": start_time,
-                "end_time": end_time
-            }).fetchall()
-            
-            return [
-                {
-                    "model": row[0],
-                    "avg_duration_ms": row[1],
-                    "min_duration_ms": row[2],
-                    "max_duration_ms": row[3]
-                }
-                for row in result
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get average duration by model: {e}")
-            raise
-        finally:
-            session.close()
-    
     def get_token_usage_stats(self, start_time: datetime, end_time: datetime) -> Dict[str, Any]:
         """
         Get token usage statistics
@@ -815,118 +713,334 @@ class AnalyticsQueryBuilder:
             "avg_output_tokens": 0,
             "avg_total_tokens": 0
         }
-    
-    def get_requests_over_time(self, interval: str = 'hour', start_time: datetime = None, end_time: datetime = None) -> List[Dict[str, Any]]:
-        """
-        Get request count over time
-        
-        Args:
-            interval: Time interval ('hour', 'day', 'week')
-            start_time: Start time for query (default: last 7 days)
-            end_time: End time for query (default: now)
-            
-        Returns:
-            List[Dict]: Request count over time
-        """
-        try:
-            session = self.db.get_session()
-            
-            if end_time is None:
-                end_time = datetime.utcnow()
-            if start_time is None:
-                start_time = end_time - timedelta(days=7)
 
-            # Build time grouping based on interval using database-specific function
-            time_column = self.db._get_date_trunc_expr(interval)
-            
-            result = session.execute(text(f"""
-                SELECT 
-                    {time_column} as time_period,
-                    COUNT(*) as request_count,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as error_count
-                FROM request_logs
-                WHERE timestamp_received BETWEEN :start_time AND :end_time
-                GROUP BY time_period
-                ORDER BY time_period
-            """), {
-                "start_time": start_time,
-                "end_time": end_time
-            }).fetchall()
-            
-            return [
+    def build_home_analytics_from_rollups(
+        self, start_time: datetime, end_time: datetime, limit: int
+    ) -> Optional[Dict[str, Any]]:
+        """Aggregate precomputed hourly rollups over [start_time, end_time]."""
+        from rollup_ops import floor_hour_utc, _rollup_tables_present  # noqa: WPS433
+
+        if not _rollup_tables_present(self.db.engine):
+            return None
+
+        sb = floor_hour_utc(start_time)
+        eb = floor_hour_utc(end_time)
+        session = self.db.get_session()
+        try:
+            mrows = session.execute(
+                text("""
+                SELECT model_name,
+                       SUM(request_count) AS rc,
+                       SUM(error_count) AS ec,
+                       SUM(completed_count) AS cc,
+                       SUM(sum_queue_wait_seconds) AS sq,
+                       SUM(sum_processing_seconds) AS sp,
+                       SUM(sum_duration_seconds) AS sd
+                FROM analytics_hourly_by_model
+                WHERE bucket_hour >= :s AND bucket_hour <= :e
+                GROUP BY model_name
+                ORDER BY rc DESC
+                """),
+                {"s": sb, "e": eb},
+            ).fetchall()
+
+            irows = session.execute(
+                text("""
+                SELECT source_ip,
+                       SUM(request_count) AS rc
+                FROM analytics_hourly_by_ip
+                WHERE bucket_hour >= :s AND bucket_hour <= :e
+                GROUP BY source_ip
+                ORDER BY rc DESC
+                LIMIT :lim
+                """),
+                {"s": sb, "e": eb, "lim": limit},
+            ).fetchall()
+
+            request_count_by_model = [
                 {
-                    "time_period": row[0],
-                    "request_count": row[1],
-                    "completed_count": row[2],
-                    "error_count": row[3]
+                    "model": row[0],
+                    "request_count": int(row[1] or 0),
+                    "completed_count": int(row[3] or 0),
+                    "error_count": int(row[2] or 0),
                 }
-                for row in result
+                for row in mrows
             ]
+
+            error_rate_analysis = []
+            for row in mrows:
+                total = int(row[1] or 0)
+                errc = int(row[2] or 0)
+                pct = round(100.0 * errc / total, 2) if total else 0.0
+                error_rate_analysis.append(
+                    {
+                        "group": row[0],
+                        "total": total,
+                        "error_count": errc,
+                        "error_rate_percent": pct,
+                        "error_messages": None,
+                    }
+                )
+
+            perf_by_model = []
+            for row in mrows:
+                cc = int(row[3] or 0)
+                if cc <= 0:
+                    continue
+                sq, sp, sd = float(row[4] or 0), float(row[5] or 0), float(row[6] or 0)
+                perf_by_model.append(
+                    {
+                        "group": row[0],
+                        "avg_wait_seconds": sq / cc,
+                        "avg_processing_seconds": sp / cc,
+                        "avg_total_seconds": sd / cc,
+                        "count": cc,
+                    }
+                )
+            perf_by_model.sort(key=lambda x: x["avg_total_seconds"], reverse=True)
+
+            request_count_by_ip = [
+                {"ip_address": row[0], "request_count": int(row[1] or 0)} for row in irows
+            ]
+
+            # IP-level error + perf
+            eirows = session.execute(
+                text("""
+                SELECT source_ip,
+                       SUM(request_count) AS rc,
+                       SUM(error_count) AS ec,
+                       SUM(completed_count) AS cc,
+                       SUM(sum_queue_wait_seconds) AS sq,
+                       SUM(sum_processing_seconds) AS sp,
+                       SUM(sum_duration_seconds) AS sd
+                FROM analytics_hourly_by_ip
+                WHERE bucket_hour >= :s AND bucket_hour <= :e
+                GROUP BY source_ip
+                ORDER BY rc DESC
+                LIMIT :lim
+                """),
+                {"s": sb, "e": eb, "lim": limit},
+            ).fetchall()
+
+            error_rate_by_ip = []
+            for row in eirows:
+                total = int(row[1] or 0)
+                errc = int(row[2] or 0)
+                pct = round(100.0 * errc / total, 2) if total else 0.0
+                error_rate_by_ip.append(
+                    {
+                        "group": row[0],
+                        "total": total,
+                        "error_count": errc,
+                        "error_rate_percent": pct,
+                        "error_messages": None,
+                    }
+                )
+
+            perf_by_ip = []
+            for row in eirows:
+                cc = int(row[3] or 0)
+                if cc <= 0:
+                    continue
+                sq, sp, sd = float(row[4] or 0), float(row[5] or 0), float(row[6] or 0)
+                perf_by_ip.append(
+                    {
+                        "group": row[0],
+                        "avg_wait_seconds": sq / cc,
+                        "avg_processing_seconds": sp / cc,
+                        "avg_total_seconds": sd / cc,
+                        "count": cc,
+                    }
+                )
+            perf_by_ip.sort(key=lambda x: x["avg_total_seconds"], reverse=True)
+
+            return {
+                "request_count_by_model": request_count_by_model,
+                "request_count_by_ip": request_count_by_ip,
+                "error_rate_analysis": error_rate_analysis,
+                "error_rate_by_ip": error_rate_by_ip,
+                "perf_by_model": perf_by_model,
+                "perf_by_ip": perf_by_ip,
+                "source": "rollups",
+            }
         except Exception as e:
-            logger.error(f"Failed to get requests over time: {e}")
-            raise
+            logger.error("build_home_analytics_from_rollups: %s", e)
+            return None
         finally:
             session.close()
 
-    def get_model_bunching_detection(self, start_time: datetime, end_time: datetime, time_window_seconds: int = 60) -> List[Dict[str, Any]]:
-        """
-        Detect model bunching - when multiple requests for the same model arrive close together
-        
-        Args:
-            start_time: Start time for query
-            end_time: End time for query
-            time_window_seconds: Time window in seconds to detect bunching (default: 60s)
-            
-        Returns:
-            List[Dict]: Model bunching statistics
-        """
+    def build_histogram_series(
+        self,
+        view: str,
+        metric: str,
+        top_n: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Time series from hourly (7d) or daily (90d) rollups."""
+        from rollup_ops import floor_hour_utc, floor_day_utc, _rollup_tables_present  # noqa: WPS433
+
+        if not _rollup_tables_present(self.db.engine):
+            return None
+
+        end_time = datetime.utcnow()
+        if view == "daily":
+            start_time = end_time - timedelta(days=90)
+            bucket_sql = "bucket_day"
+            table_m = "analytics_daily_by_model"
+            table_i = "analytics_daily_by_ip"
+            start_b = floor_day_utc(start_time)
+            end_b = floor_day_utc(end_time)
+        else:
+            start_time = end_time - timedelta(days=7)
+            bucket_sql = "bucket_hour"
+            table_m = "analytics_hourly_by_model"
+            table_i = "analytics_hourly_by_ip"
+            start_b = floor_hour_utc(start_time)
+            end_b = floor_hour_utc(end_time)
+
+        session = self.db.get_session()
         try:
-            session = self.db.get_session()
-            
-            # Query to detect bunching: count requests per model in time windows
-            # We'll group by model and time buckets to find bunching patterns
-            result = session.execute(text("""
-                WITH time_buckets AS (
-                    SELECT 
-                        model_name,
-                        datetime((strftime('%s', timestamp_received) / :window_seconds) * :window_seconds, 'unixepoch') as time_bucket,
-                        COUNT(*) as requests_in_bucket
-                    FROM request_logs
-                    WHERE timestamp_received BETWEEN :start_time AND :end_time
-                    GROUP BY model_name, time_bucket
-                )
-                SELECT 
-                    model_name,
-                    COUNT(*) as total_time_buckets,
-                    AVG(requests_in_bucket) as avg_requests_per_bucket,
-                    MAX(requests_in_bucket) as max_requests_in_bucket,
-                    SUM(CASE WHEN requests_in_bucket > 1 THEN 1 ELSE 0 END) as bunched_buckets,
-                    ROUND(100.0 * SUM(CASE WHEN requests_in_bucket > 1 THEN 1 ELSE 0 END) / COUNT(*), 2) as bunching_rate_percent
-                FROM time_buckets
-                GROUP BY model_name
-                HAVING bunched_buckets > 0
-                ORDER BY bunching_rate_percent DESC, max_requests_in_bucket DESC
-            """), {
-                "start_time": start_time,
-                "end_time": end_time,
-                "window_seconds": time_window_seconds
-            }).fetchall()
-            
-            return [
-                {
-                    "model_name": row[0],
-                    "total_time_buckets": row[1],
-                    "avg_requests_per_bucket": round(row[2], 2),
-                    "max_requests_in_bucket": row[3],
-                    "bunched_buckets": row[4],
-                    "bunching_rate_percent": row[5]
+            # Enumerate buckets
+            if view == "daily":
+                buckets_rows = session.execute(
+                    text(
+                        f"""
+                    SELECT DISTINCT {bucket_sql} AS b FROM {table_m}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    ORDER BY b
+                    """
+                    ),
+                    {"s": start_b, "e": end_b},
+                ).fetchall()
+            else:
+                buckets_rows = session.execute(
+                    text(
+                        f"""
+                    SELECT DISTINCT {bucket_sql} AS b FROM {table_m}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    ORDER BY b
+                    """
+                    ),
+                    {"s": start_b, "e": end_b},
+                ).fetchall()
+            buckets = [r[0] for r in buckets_rows]
+            if not buckets:
+                return {
+                    "view": view,
+                    "metric": metric,
+                    "buckets": [],
+                    "by_model": [],
+                    "by_ip": [],
                 }
-                for row in result
-            ]
+
+            # Top series by total request_count in window (metric-specific denominator)
+            if metric in ("queue_wait", "processing", "duration"):
+                top_m = session.execute(
+                    text(
+                        f"""
+                    SELECT model_name FROM {table_m}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    GROUP BY model_name
+                    HAVING SUM(completed_count) > 0
+                    ORDER BY SUM(completed_count) DESC
+                    LIMIT :n
+                    """
+                    ),
+                    {"s": start_b, "e": end_b, "n": top_n},
+                ).fetchall()
+                top_i = session.execute(
+                    text(
+                        f"""
+                    SELECT source_ip FROM {table_i}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    GROUP BY source_ip
+                    HAVING SUM(completed_count) > 0
+                    ORDER BY SUM(completed_count) DESC
+                    LIMIT :n
+                    """
+                    ),
+                    {"s": start_b, "e": end_b, "n": top_n},
+                ).fetchall()
+            else:
+                top_m = session.execute(
+                    text(
+                        f"""
+                    SELECT model_name FROM {table_m}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    GROUP BY model_name
+                    ORDER BY SUM(request_count) DESC
+                    LIMIT :n
+                    """
+                    ),
+                    {"s": start_b, "e": end_b, "n": top_n},
+                ).fetchall()
+                top_i = session.execute(
+                    text(
+                        f"""
+                    SELECT source_ip FROM {table_i}
+                    WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e
+                    GROUP BY source_ip
+                    ORDER BY SUM(request_count) DESC
+                    LIMIT :n
+                    """
+                    ),
+                    {"s": start_b, "e": end_b, "n": top_n},
+                ).fetchall()
+
+            labels_m = [r[0] for r in top_m]
+            labels_i = [r[0] for r in top_i]
+
+            def series_for_labels(table: str, key_col: str, labels: List[str], dim: str) -> List[Dict[str, Any]]:
+                out = []
+                for lab in labels:
+                    rows = session.execute(
+                        text(
+                            f"""
+                        SELECT {bucket_sql} AS b, request_count, error_count, completed_count,
+                               sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                        FROM {table}
+                        WHERE {bucket_sql} >= :s AND {bucket_sql} <= :e AND {key_col} = :lab
+                        """
+                        ),
+                        {"s": start_b, "e": end_b, "lab": lab},
+                    ).fetchall()
+                    rowmap = {r[0]: r for r in rows}
+
+                    vals = []
+                    for b in buckets:
+                        r = rowmap.get(b)
+                        if not r:
+                            vals.append(0.0)
+                            continue
+                        rq, er, cc = int(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
+                        sq, sp, sd = float(r[4] or 0), float(r[5] or 0), float(r[6] or 0)
+                        if metric == "requests":
+                            vals.append(float(rq))
+                        elif metric == "error_rate":
+                            vals.append(100.0 * er / rq if rq else 0.0)
+                        elif metric == "queue_wait":
+                            vals.append(sq / cc if cc else 0.0)
+                        elif metric == "processing":
+                            vals.append(sp / cc if cc else 0.0)
+                        elif metric == "duration":
+                            vals.append(sd / cc if cc else 0.0)
+                        else:
+                            vals.append(float(rq))
+                    out.append({"label": lab, "values": vals, "dimension": dim})
+                return out
+
+            by_model = series_for_labels(table_m, "model_name", labels_m, "model")
+            by_ip = series_for_labels(table_i, "source_ip", labels_i, "ip")
+
+            return {
+                "view": view,
+                "metric": metric,
+                "buckets": [b.isoformat() if hasattr(b, "isoformat") else str(b) for b in buckets],
+                "by_model": by_model,
+                "by_ip": by_ip,
+            }
         except Exception as e:
-            logger.error(f"Failed to get model bunching detection: {e}")
-            raise
+            logger.error("build_histogram_series: %s", e)
+            return None
         finally:
             session.close()
 

@@ -52,6 +52,8 @@ ACTIVE_REQUEST_MAX_DURATION = int(os.getenv("ACTIVE_REQUEST_MAX_DURATION", "600"
 QUEUE_ENTRY_MAX_AGE = int(os.getenv("QUEUE_ENTRY_MAX_AGE", str(REQUEST_TIMEOUT + 60)))  # REQUEST_TIMEOUT + 60s
 STREAM_CHUNK_TIMEOUT = int(os.getenv("STREAM_CHUNK_TIMEOUT", "300"))  # 5 min between chunks
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "0"))  # 0 = keep all
+ANALYTICS_HOURLY_RETENTION_DAYS = int(os.getenv("ANALYTICS_HOURLY_RETENTION_DAYS", "8"))
+ANALYTICS_DAILY_RETENTION_DAYS = int(os.getenv("ANALYTICS_DAILY_RETENTION_DAYS", "91"))
 
 # Priority Scoring (0 = highest priority, higher numbers = lower priority)
 PRIORITY_BASE_LOADED = int(os.getenv("PRIORITY_BASE_LOADED", "100"))          # Model already loaded
@@ -790,6 +792,25 @@ async def log_retention_task():
         except Exception as e:
             logger.error(f"Log retention task error: {e}", extra={"event": "log_retention_error"})
 
+
+async def rollup_retention_task():
+    """Delete old precomputed analytics rollup buckets (independent of LOG_RETENTION_DAYS)."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            from rollup_ops import delete_rollups_older_than
+
+            now = datetime.utcnow()
+            hourly_cutoff = now - timedelta(days=ANALYTICS_HOURLY_RETENTION_DAYS)
+            daily_cutoff = now - timedelta(days=ANALYTICS_DAILY_RETENTION_DAYS)
+            db = get_db()
+            counts = delete_rollups_older_than(db, hourly_cutoff, daily_cutoff)
+            if counts and sum(counts.values()) > 0:
+                logger.info("Rollup retention: %s", counts, extra={"event": "rollup_retention"})
+        except Exception as e:
+            logger.error(f"Rollup retention task error: {e}", extra={"event": "rollup_retention_error"})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -797,6 +818,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(queue_worker())
     asyncio.create_task(stale_request_sweeper())
     asyncio.create_task(log_retention_task())
+    asyncio.create_task(rollup_retention_task())
     
     # Recover any pending fallback logs
     from database import get_db

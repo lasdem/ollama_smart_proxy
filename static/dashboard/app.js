@@ -62,11 +62,13 @@
       // Auto-refresh data when switching tabs
       if (tab === 'home' && getKey()) loadHome();
       if (tab === 'conversations' && getKey()) loadSessions();
+      if (tab === 'histogram' && getKey()) loadHistogram();
     });
   });
   document.querySelector('.tabs button[data-tab="home"]').classList.add('active');
   document.getElementById('conversations').classList.add('hidden');
   document.getElementById('history').classList.add('hidden');
+  document.getElementById('histogram').classList.add('hidden');
   document.getElementById('admin').classList.add('hidden');
 
   /* ================================================================
@@ -884,6 +886,163 @@
   document.getElementById('closeDetail').addEventListener('click', function () { document.getElementById('detailModal').classList.add('hidden'); });
   document.getElementById('detailModal').addEventListener('click', function (e) { if (e.target.id === 'detailModal') document.getElementById('detailModal').classList.add('hidden'); });
 
+  /* ================================================================
+     HISTOGRAM (precomputed rollups)
+     ================================================================ */
+  var histChartModel = null;
+  var histChartIp = null;
+  var HIST_HEIGHT_STORAGE = 'proxy_dashboard_hist_chart_height_px';
+  var DEFAULT_HIST_HEIGHT = 560;
+  var histChartHeightPx = DEFAULT_HIST_HEIGHT;
+  var HIST_HEIGHT_MIN = 200;
+  var HIST_HEIGHT_MAX = 900;
+
+  function loadHistChartHeightFromStorage() {
+    var saved = localStorage.getItem(HIST_HEIGHT_STORAGE);
+    if (!saved) return;
+    var n = parseInt(saved, 10);
+    if (!isNaN(n) && n >= HIST_HEIGHT_MIN && n <= HIST_HEIGHT_MAX) histChartHeightPx = n;
+  }
+
+  function setHistChartHeightPx(px) {
+    histChartHeightPx = Math.min(HIST_HEIGHT_MAX, Math.max(HIST_HEIGHT_MIN, Math.round(px)));
+    localStorage.setItem(HIST_HEIGHT_STORAGE, String(histChartHeightPx));
+    applyHistChartHeight();
+  }
+
+  function applyHistChartHeight() {
+    var px = histChartHeightPx;
+    document.querySelectorAll('.hist-canvas-wrap').forEach(function (w) {
+      w.style.height = px + 'px';
+    });
+    if (histChartModel) histChartModel.resize();
+    if (histChartIp) histChartIp.resize();
+  }
+
+  (function initHistChartResize() {
+    loadHistChartHeightFromStorage();
+    applyHistChartHeight();
+    var handle = document.getElementById('histResizeHandle');
+    if (!handle) return;
+    var dragging = false;
+    var startY = 0;
+    var startH = 0;
+    function onMove(e) {
+      if (!dragging) return;
+      var dy = e.clientY - startY;
+      setHistChartHeightPx(startH + dy);
+      e.preventDefault();
+    }
+    function onUp() {
+      if (!dragging) return;
+      dragging = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    function onTouchMove(e) {
+      if (!dragging || !e.touches || !e.touches[0]) return;
+      var te = e.touches[0];
+      var dy = te.clientY - startY;
+      setHistChartHeightPx(startH + dy);
+      e.preventDefault();
+    }
+    function startDrag(clientY) {
+      dragging = true;
+      startY = clientY;
+      startH = histChartHeightPx;
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      document.addEventListener('touchmove', onTouchMove, { passive: false });
+      document.addEventListener('touchend', onUp);
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+    }
+    handle.addEventListener('mousedown', function (e) {
+      startDrag(e.clientY);
+      e.preventDefault();
+    });
+    handle.addEventListener('touchstart', function (e) {
+      if (!e.touches || !e.touches[0]) return;
+      startDrag(e.touches[0].clientY);
+      e.preventDefault();
+    }, { passive: false });
+  })();
+
+  function histYAxisTitle(metric) {
+    switch (metric) {
+      case 'queue_wait': return 'Avg queue wait (s)';
+      case 'processing': return 'Avg processing (s)';
+      case 'duration': return 'Avg duration (s)';
+      case 'error_rate': return 'Error %';
+      default: return 'Requests';
+    }
+  }
+
+  function loadHistogram() {
+    var key = getKey();
+    if (!key) return;
+    if (typeof Chart === 'undefined') return;
+    applyHistChartHeight();
+    var viewEl = document.getElementById('histView');
+    var metricEl = document.getElementById('histMetric');
+    if (!viewEl || !metricEl) return;
+    var view = viewEl.value;
+    var metric = metricEl.value;
+    fetch(API_BASE + '/analytics/histogram?view=' + encodeURIComponent(view) + '&metric=' + encodeURIComponent(metric) + '&top_n=12', { headers: apiHeaders() })
+      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (data) {
+        var labels = (data.buckets || []).map(function (b) {
+          var s = String(b);
+          return s.length > 16 ? s.slice(5, 16) : s;
+        });
+        function mkDs(series) {
+          return (series || []).map(function (s, idx) {
+            var lab = String(s.label || '');
+            if (lab.length > 28) lab = lab.slice(0, 28) + '…';
+            var hue = (idx * 47) % 360;
+            return {
+              label: lab,
+              data: s.values || [],
+              borderColor: 'hsl(' + hue + ',70%,55%)',
+              backgroundColor: 'transparent',
+              borderWidth: 1.5,
+              fill: false,
+              tension: 0.12,
+              pointRadius: 0
+            };
+          });
+        }
+        var yTitle = histYAxisTitle(data.metric || metric);
+        var opts = {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 }, color: '#bbb' } } },
+          scales: {
+            x: { ticks: { maxRotation: 60, minRotation: 30, color: '#888', font: { size: 9 } }, grid: { color: '#333' } },
+            y: { title: { display: true, text: yTitle, color: '#888' }, ticks: { color: '#888' }, grid: { color: '#333' } }
+          }
+        };
+        var elM = document.getElementById('chartModel');
+        var elI = document.getElementById('chartIp');
+        if (histChartModel) { histChartModel.destroy(); histChartModel = null; }
+        if (histChartIp) { histChartIp.destroy(); histChartIp = null; }
+        histChartModel = new Chart(elM, { type: 'line', data: { labels: labels, datasets: mkDs(data.by_model) }, options: opts });
+        histChartIp = new Chart(elI, { type: 'line', data: { labels: labels, datasets: mkDs(data.by_ip) }, options: opts });
+      })
+      .catch(function (e) { console.error(e); alert('Histogram: ' + e.message); });
+  }
+
+  var loadHistBtn = document.getElementById('loadHistogram');
+  if (loadHistBtn) loadHistBtn.addEventListener('click', function () { loadHistogram(); });
+  var histViewEl = document.getElementById('histView');
+  var histMetricEl = document.getElementById('histMetric');
+  if (histViewEl) histViewEl.addEventListener('change', function () { if (getKey()) loadHistogram(); });
+  if (histMetricEl) histMetricEl.addEventListener('change', function () { if (getKey()) loadHistogram(); });
+
   /* Auto-load sessions on start if key is set */
   if (getKey()) { loadSessions(); }
 
@@ -912,4 +1071,12 @@
   if (dbDownBtn) dbDownBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { db_available: false }); });
   var dbRestoreBtn = document.getElementById('adminDbRestore');
   if (dbRestoreBtn) dbRestoreBtn.addEventListener('click', function () { adminPost(API_BASE + '/testing', { db_available: true }); });
+  var purgeBtn = document.getElementById('adminDbPurge');
+  if (purgeBtn) purgeBtn.addEventListener('click', function () {
+    var logs = document.getElementById('purgeRequestLogs') && document.getElementById('purgeRequestLogs').checked;
+    var roll = document.getElementById('purgeAnalyticsRollups') && document.getElementById('purgeAnalyticsRollups').checked;
+    if (!logs && !roll) { showAdminResult('Select at least one: request logs and/or analytics rollups'); return; }
+    if (!window.confirm('Permanently delete selected data?')) return;
+    adminPost(API_BASE + '/admin/db/purge', { request_logs: !!logs, analytics_rollups: !!roll });
+  });
 })();

@@ -7,6 +7,7 @@
   <title>Proxy Monitor — Ollama Smart Proxy</title>
   <link rel="stylesheet" href="app.css">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header class="header">
@@ -15,6 +16,7 @@
   </header>
   <nav class="tabs">
     <button data-tab="home">Home</button>
+    <button data-tab="histogram">Histogram</button>
     <button data-tab="conversations">Conversations</button>
     <button data-tab="history">Request History</button>
     <button data-tab="admin">Admin</button>
@@ -74,6 +76,30 @@
             <div class="dash-card-body" id="homeErrorsIp"></div>
           </div>
         </div>
+      </div>
+    </section>
+    <section id="histogram" class="tab-panel hidden">
+      <div class="hist-controls">
+        <button id="loadHistogram" type="button">Refresh</button>
+        <label>View <select id="histView"><option value="hourly">Hourly (7d)</option><option value="daily">Daily (90d)</option></select></label>
+        <label>Metric <select id="histMetric">
+          <option value="requests">Requests</option>
+          <option value="queue_wait">Avg queue wait (s)</option>
+          <option value="processing">Avg processing (s)</option>
+          <option value="duration">Avg total duration (s)</option>
+          <option value="error_rate">Error rate %</option>
+        </select></label>
+      </div>
+      <div class="hist-charts">
+        <div class="dash-card hist-chart-card">
+          <div class="dash-card-title">By model</div>
+          <div class="hist-canvas-wrap"><canvas id="chartModel"></canvas></div>
+        </div>
+        <div class="dash-card hist-chart-card">
+          <div class="dash-card-title">By IP</div>
+          <div class="hist-canvas-wrap"><canvas id="chartIp"></canvas></div>
+        </div>
+        <div class="hist-resize-handle" id="histResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Drag to resize chart height" title="Drag to resize chart height"></div>
       </div>
     </section>
     <section id="conversations" class="tab-panel hidden">
@@ -147,6 +173,16 @@
               <button id="adminPause" class="admin-btn">Pause Queue</button>
               <button id="adminResume" class="admin-btn">Resume Queue</button>
               <button id="adminClearStale" class="admin-btn admin-btn-danger">Clear Stale</button>
+            </div>
+          </div>
+        </div>
+        <div class="dash-card">
+          <div class="dash-card-title">Database purge</div>
+          <div class="dash-card-body">
+            <label class="admin-purge-label"><input type="checkbox" id="purgeRequestLogs" /> Delete all request logs</label>
+            <label class="admin-purge-label"><input type="checkbox" id="purgeAnalyticsRollups" /> Delete all analytics rollups</label>
+            <div style="margin-top:0.5rem">
+              <button id="adminDbPurge" type="button" class="admin-btn admin-btn-danger">Purge selected</button>
             </div>
           </div>
         </div>

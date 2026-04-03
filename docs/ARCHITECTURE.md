@@ -72,7 +72,7 @@ flowchart TB
 |-----------|----------|------|
 | **FastAPI app** | `src/smart_proxy.py` | Creates app, lifespan (start VRAM monitor, queue worker, fallback recovery), injects dependencies, mounts routers. |
 | **Ollama router** | `src/ollama_endpoints.py` | Prefix: none. Handles `/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/completions` → enqueue; admin routes (`/api/pull`, `/api/push`, etc.) → verify admin + forward; catch-all → forward. |
-| **Proxy router** | `src/proxy_endpoints.py` | Prefix: `/proxy`. Health, queue status, VRAM status, query_db, query_db filters (incl. session_id), request detail `GET /proxy/requests/{request_id}`, WebSocket `/proxy/live` for live stream, dashboard `GET /proxy/dashboard` (and static assets), analytics, testing control, auth. |
+| **Proxy router** | `src/proxy_endpoints.py` | Prefix: `/proxy`. Health, queue status, VRAM status, query_db, query_db filters (incl. session_id), request detail `GET /proxy/requests/{request_id}`, WebSocket `/proxy/live` for live stream, dashboard `GET /proxy/dashboard` (and static assets), analytics, `GET /analytics/histogram`, `POST /admin/db/purge`, testing control, auth. |
 
 Dependencies (tracker, queue, VRAM monitor, admin settings, etc.) are injected from `smart_proxy.py` into the router modules via `inject_dependencies` / `set_dependencies`.
 
@@ -128,8 +128,8 @@ All base and multiplier values are configurable via environment variables (see C
 - **DatabaseConnection** (`src/database.py`): Supports **SQLite** or **PostgreSQL** via `DB_TYPE`. Creates tables from SQLAlchemy models; exposes `get_session()`, `write_to_fallback_file()`, `recover_from_fallback_files()`.
 - **RequestLog** (SQLAlchemy): `request_logs` table — `request_id`, `source_ip`, `model_name`, `prompt_text`, `response_text`, `timestamp_received`, `timestamp_started`, `timestamp_completed`, `duration_seconds`, `priority_score`, `queue_wait_seconds`, `processing_time_seconds`, `status`, `error_message`, `session_id`, `outgoing_conversation_fingerprint`, `created_at`. **Session grouping is content-based**: a request belongs to the same session as a previous one when its `messages` array (minus the last user message) matches that previous request’s messages plus assistant response. At enqueue, an incoming fingerprint is computed from `messages[:-1]` and matched to `outgoing_conversation_fingerprint` (hash of messages+response) of a prior request from the same IP; if found, that request’s `session_id` is reused. If the request starts with a single user message (no history), it gets a new session.
 - **RequestLogRepository** (`src/data_access.py`): `log_request()` (upsert-style create/update), plus get-by-id, by-model, by-IP. On DB failure, writes to fallback JSONL under `FALLBACK_LOG_DIR`.
-- **AnalyticsQueryBuilder** (`database.py`): Raw analytics queries (error rates, counts by model/IP, priority distribution, performance stats, requests over time, model bunching). DB-agnostic via parameterized SQL and DB-specific date truncation.
-- **AnalyticsRepository** (`data_access.py`): Wraps `AnalyticsQueryBuilder` for the `/proxy/analytics` API.
+- **AnalyticsQueryBuilder** (`database.py`): Raw analytics queries (error rates, counts by model/IP, performance stats) plus `build_home_analytics_from_rollups` and `build_histogram_series` over precomputed tables. **Rollup tables** (`analytics_hourly_by_*`, `analytics_daily_by_*`): wide facts (request/error/completed counts and sum of queue/processing/duration for completed rows), maintained from `RequestLogRepository.log_request` via `rollup_ops.py`. DB-agnostic SQL.
+- **AnalyticsRepository** (`data_access.py`): Wraps `AnalyticsQueryBuilder` for `/proxy/analytics` and histogram responses.
 
 ### 3.7 Logging
 
@@ -169,7 +169,7 @@ See `.env.example` for defaults and examples.
 
 ## 6. Security (Admin Endpoints)
 
-- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/analytics`, `/proxy/requests/*`; WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
+- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/analytics`, `/proxy/analytics/histogram`, `/proxy/admin/db/purge`, `/proxy/requests/*`; WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
 - **Dashboard (public UI, protected data):** `GET /proxy/dashboard` and `GET /proxy/dashboard/*` do **not** require auth, so users can load the page and enter the admin key in the browser. All dashboard data (query_db, request detail, live WebSocket) requires the key (header `X-Admin-Key` or query `?key=`) or IP/session.
 - **Auth:** Static IPs from `ADMIN_IPS`, or IPs that have called `POST /proxy/auth` with correct `key` (24h TTL), or request header `X-Admin-Key` matching `PROXY_ADMIN_KEY`. WebSocket accepts same IP/session or `?key=PROXY_ADMIN_KEY`. Enforced by `verify_admin_access()` (and equivalent checks for WebSocket).
 
@@ -192,11 +192,11 @@ See `.env.example` for defaults and examples.
 |--------|----------------|
 | `smart_proxy.py` | App, lifespan, queue worker, enqueue/process_request (with session_id), RequestTracker, QueuedRequest, global state; wires stream_tap and live_broadcaster. |
 | `ollama_endpoints.py` | Queued Ollama endpoints, protected admin routes, catch-all forward. |
-| `proxy_endpoints.py` | /proxy health, queue, vram, query_db (incl. session_id filter), request detail, WebSocket /proxy/live, dashboard static, analytics, testing, auth. |
+| `proxy_endpoints.py` | /proxy health, queue, vram, query_db (incl. session_id filter), request detail, WebSocket /proxy/live, dashboard static, analytics, histogram, db purge, testing, auth. |
 | `stream_tap.py` | tee_stream, NDJSON parsing per endpoint, on_chunk/on_done callbacks for logging and broadcast. |
 | `live_broadcaster.py` | LiveBroadcaster: in-flight request state, broadcast to WebSocket clients, join in-progress. |
 | `vram_monitor.py` | VRAMMonitor, /api/ps polling, get_vram_for_model, can_fit_parallel. |
-| `database.py` | DatabaseConnection, RequestLog (incl. session_id), AnalyticsQueryBuilder, init_db, get_db, fallback and recovery. |
+| `database.py` | DatabaseConnection, RequestLog, rollup ORM models, AnalyticsQueryBuilder, init_db, get_db, fallback and recovery. |
 | `data_access.py` | RequestLogRepository, AnalyticsRepository, init_repositories, get_*_repo. |
 | `utils.py` | generate_request_id, verify_admin_access, forward_request_to_ollama. |
 | `log_formatter.py` | StructuredFormatter, UvicornAccessFormatter, setup_logging. |

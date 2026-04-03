@@ -14,6 +14,21 @@ Each entry should include:
 
 ## 2026-04-03
 
+### .env.example inline documentation
+- **Topic**: Configuration reference for operators.
+- **Summary**: Added per-variable comments to `.env.example` (purpose, typical ranges, and notes where code defaults differ from the sample values).
+- **Related Files**: `.env.example` — see `.cursor/logs/2026/04/03/conversation-env-example-comments.md`
+
+### Histogram tab order and adjustable chart height (dashboard)
+- **Topic**: Dashboard UX — tab order and histogram panel sizing.
+- **Summary**: Moved the Histogram tab between Home and Conversations (nav + main section order). Default chart canvas area height doubled from 280px to 560px; added a range slider (200–900px) with persistence in `localStorage` (`proxy_dashboard_hist_chart_height_px`).
+- **Related Files**: `static/dashboard/index.html`, `static/dashboard/app.css`, `static/dashboard/app.js` — see `.cursor/logs/2026/04/03/conversation-histogram-tab-order-height.md`
+
+### v4.8 Analytics rollups and histogram dashboard
+- **Topic**: Precomputed hourly/daily facts for Home metrics; Chart.js histogram; optional fast `/proxy/analytics`; admin purge of logs/rollups; removed unused analytics API fields.
+- **Summary**: New `rollup_ops.py`, four rollup tables + `migrate_db.py` v4 backfill, `GET /proxy/analytics/histogram`, `POST /proxy/admin/db/purge`, dashboard Histogram tab + purge controls, retention task in `smart_proxy.py`.
+- **Related Files**: `src/database.py`, `src/rollup_ops.py`, `src/data_access.py`, `src/proxy_endpoints.py`, `src/smart_proxy.py`, `scripts/migrate_db.py`, `static/dashboard/*`, `docs/changelog/v4.8_ANALYTICS_ROLLUPS.md`
+
 ### v4.7.4 Thinking panel autoscroll (dashboard)
 - **Topic**: Long streamed reasoning stayed scrolled to the top of the fixed-height thinking box.
 - **Summary**: After setting `textContent` on `.thread-thinking-body`, set `scrollTop = scrollHeight`. Sync thinking text from `full_thinking` on content-kind chunks so the pane updates when the RAF batch ends on a content chunk.

@@ -163,6 +163,170 @@ def migrate_to_v3():
     logger.info("Migration v3 complete")
 
 
+def migrate_to_v4():
+    """
+    Migration v4: Precomputed analytics rollup tables + backfill from request_logs
+    """
+    logger.info("Running migration v4: Analytics rollup tables")
+    init_db()
+    db = get_db()
+    session = db.get_session()
+    cfg = db._get_db_config()
+    is_pg = cfg.get("DB_TYPE") == "postgres"
+    try:
+        inspector = inspect(db.engine)
+        if "analytics_hourly_by_model" not in inspector.get_table_names():
+            logger.warning("Rollup tables missing; ensure app created schema (run migrate again after deploy)")
+            record_migration(4, "Analytics rollup tables (pending create_all)")
+            return
+
+        n = session.execute(text("SELECT COUNT(*) FROM analytics_hourly_by_model")).scalar() or 0
+        if n > 0:
+            logger.info("Rollup tables already contain data; skipping backfill")
+            record_migration(4, "Analytics rollup tables (backfill skipped, non-empty)")
+            return
+
+        if is_pg:
+            session.execute(text("""
+                INSERT INTO analytics_hourly_by_model (
+                    bucket_hour, model_name, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT date_trunc('hour', timestamp_received),
+                       model_name,
+                       COUNT(*)::int,
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::int,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int,
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN queue_wait_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN processing_time_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN duration_seconds ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_hourly_by_ip (
+                    bucket_hour, source_ip, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT date_trunc('hour', timestamp_received),
+                       source_ip,
+                       COUNT(*)::int,
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::int,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int,
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN queue_wait_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN processing_time_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN duration_seconds ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_daily_by_model (
+                    bucket_day, model_name, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT date_trunc('day', timestamp_received),
+                       model_name,
+                       COUNT(*)::int,
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::int,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int,
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN queue_wait_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN processing_time_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN duration_seconds ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_daily_by_ip (
+                    bucket_day, source_ip, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT date_trunc('day', timestamp_received),
+                       source_ip,
+                       COUNT(*)::int,
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::int,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)::int,
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN queue_wait_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN processing_time_seconds ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN duration_seconds ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+        else:
+            session.execute(text("""
+                INSERT INTO analytics_hourly_by_model (
+                    bucket_hour, model_name, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT datetime(strftime('%Y-%m-%d %H:00:00', timestamp_received)),
+                       model_name,
+                       COUNT(*),
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(queue_wait_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(processing_time_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(duration_seconds,0) ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_hourly_by_ip (
+                    bucket_hour, source_ip, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT datetime(strftime('%Y-%m-%d %H:00:00', timestamp_received)),
+                       source_ip,
+                       COUNT(*),
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(queue_wait_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(processing_time_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(duration_seconds,0) ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_daily_by_model (
+                    bucket_day, model_name, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT datetime(strftime('%Y-%m-%d 00:00:00', timestamp_received)),
+                       model_name,
+                       COUNT(*),
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(queue_wait_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(processing_time_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(duration_seconds,0) ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+            session.execute(text("""
+                INSERT INTO analytics_daily_by_ip (
+                    bucket_day, source_ip, request_count, error_count, completed_count,
+                    sum_queue_wait_seconds, sum_processing_seconds, sum_duration_seconds
+                )
+                SELECT datetime(strftime('%Y-%m-%d 00:00:00', timestamp_received)),
+                       source_ip,
+                       COUNT(*),
+                       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(queue_wait_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(processing_time_seconds,0) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(duration_seconds,0) ELSE 0 END), 0)
+                FROM request_logs
+                GROUP BY 1, 2
+            """))
+        session.commit()
+        record_migration(4, "Analytics rollup tables + backfill from request_logs")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Migration v4 failed: {e}")
+        raise
+    finally:
+        session.close()
+    logger.info("Migration v4 complete")
+
+
 def backfill_from_fallback_logs():
     """
     Backfill data from fallback log files into the database
@@ -210,6 +374,7 @@ def run_migrations(target_version: int = None):
         1: migrate_to_v1,
         2: migrate_to_v2,
         3: migrate_to_v3,
+        4: migrate_to_v4,
     }
     
     # Determine which migrations to run

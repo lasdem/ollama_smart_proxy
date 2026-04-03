@@ -88,11 +88,10 @@ class TestAnalyticsEndpoint:
         assert "time_range" in data
         assert "request_count_by_model" in data
         assert "request_count_by_ip" in data
-        assert "average_duration_by_model" in data
-        assert "priority_score_distribution" in data
         assert "error_rate_analysis" in data
-        assert "model_bunching_detection" in data
-        assert "requests_over_time" in data
+        assert "error_rate_by_ip" in data
+        assert "perf_by_model" in data
+        assert "perf_by_ip" in data
         
         # Verify time_range structure
         assert "start" in data["time_range"]
@@ -125,9 +124,8 @@ class TestAnalyticsEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         
-        # Check that grouping fields exist
-        for item in data.get("priority_score_distribution", []):
-            assert "group" in item or "model_name" in item or "group_key" in item
+        for item in data.get("error_rate_analysis", []):
+            assert "group" in item
     
     def test_analytics_grouping_by_hour(self):
         """Test analytics grouped by hour"""
@@ -140,8 +138,7 @@ class TestAnalyticsEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         
-        # Should return hourly data
-        assert isinstance(data["requests_over_time"], list)
+        assert isinstance(data["error_rate_analysis"], list)
     
     def test_analytics_limit_parameter(self):
         """Test analytics limit parameter for top results"""
@@ -283,17 +280,6 @@ class TestDatabaseDateTruncation:
         else:
             assert "DATE_TRUNC" in expr
     
-    def test_requests_over_time_query(self):
-        """Test that requests_over_time query works with SQLite"""
-        analytics = get_analytics()
-        
-        try:
-            # Should not raise OperationalError for DATE_TRUNC
-            result = analytics.get_requests_over_time(interval='hour')
-            assert isinstance(result, list)
-        except Exception as e:
-            pytest.fail(f"requests_over_time failed: {e}")
-    
     def test_error_rate_analysis_with_hour_grouping(self):
         """Test error rate analysis with hour grouping (uses date truncation)"""
         analytics = get_analytics()
@@ -306,19 +292,6 @@ class TestDatabaseDateTruncation:
         except Exception as e:
             pytest.fail(f"error_rate_analysis with hour grouping failed: {e}")
     
-    def test_priority_distribution_with_hour_grouping(self):
-        """Test priority score distribution with hour grouping"""
-        analytics = get_analytics()
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=24)
-        
-        try:
-            result = analytics.get_priority_score_distribution(start_time, end_time, group_by='hour')
-            assert isinstance(result, list)
-        except Exception as e:
-            pytest.fail(f"priority_score_distribution with hour grouping failed: {e}")
-
-
 class TestAnalyticsQueries:
     """Test analytics repository queries directly"""
     
@@ -350,27 +323,18 @@ class TestAnalyticsQueries:
             assert "ip_address" in item
             assert "request_count" in item
     
-    def test_average_duration_by_model(self):
-        """Test average duration by model query"""
-        analytics = get_analytics_repo()
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=24)
-        
-        result = analytics.get_average_duration_by_model(start_time, end_time)
-        assert isinstance(result, list)
-        
-        for item in result:
-            assert "model" in item
-            assert "avg_duration_ms" in item
-    
-    def test_model_bunching_detection(self):
-        """Test model bunching detection query"""
-        analytics = get_analytics_repo()
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=24)
-        
-        result = analytics.get_model_bunching_detection(start_time, end_time, time_window_seconds=60)
-        assert isinstance(result, list)
+    def test_histogram_endpoint(self):
+        """GET /proxy/analytics/histogram returns rollup time series"""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/analytics/histogram",
+            headers=headers,
+            params={"view": "hourly", "metric": "requests", "top_n": 5},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "buckets" in data and "by_model" in data and "by_ip" in data
 
 
 class TestTestingEndpoint:
