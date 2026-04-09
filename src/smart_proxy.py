@@ -302,11 +302,16 @@ async def enqueue_request(request: Request, path: str):
     
     # Extract prompt for logging: use the LAST user message (the new query in multi-turn conversations)
     prompt_text = "N/A"
+    system_message = None
     if "messages" in body:
         msgs = body['messages']
         if msgs and isinstance(msgs, list):
             last_msg = msgs[-1]
             prompt_text = str(last_msg.get('content', '')) if isinstance(last_msg, dict) else str(last_msg)
+            for m in msgs:
+                if isinstance(m, dict) and m.get('role') == 'system':
+                    system_message = str(m.get('content', ''))
+                    break
     elif "prompt" in body:
         prompt_text = str(body['prompt'])
 
@@ -350,6 +355,7 @@ async def enqueue_request(request: Request, path: str):
         endpoint=path,
         user_agent=request.headers.get("user-agent"),
         request_body=request_body_str,
+        system_message=system_message,
     )
     
     async with queue_lock:

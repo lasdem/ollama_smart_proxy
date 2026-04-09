@@ -399,6 +399,7 @@ async def query_db(
                 "user_agent": record.user_agent,
                 "thinking_text": record.thinking_text,
                 "request_body": record.request_body,
+                "system_message": record.system_message,
             }
             requests_data.append(record_dict)
         
@@ -459,6 +460,8 @@ async def proxy_request_detail(request: Request, request_id: str):
         "endpoint": log.endpoint,
         "user_agent": log.user_agent,
         "thinking_text": log.thinking_text,
+        "request_body": log.request_body,
+        "system_message": log.system_message,
     }
 
 

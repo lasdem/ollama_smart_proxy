@@ -112,7 +112,7 @@
   /** Narrow columns for faster /proxy/query_db (skip large TEXT blobs). */
   var FIELDS_HOME_RECENT = 'request_id,model,ip_address,status,duration_seconds,processing_time_seconds,queue_wait_seconds,timestamp_received,timestamp_completed,session_id,endpoint';
   /** Session list + thread: omit request_body (large); keep response/thinking for display. API uses key `model`. */
-  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score';
+  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score,system_message';
   var DEBOUNCE_MS = 150;
   /** Min interval between WebSocket-triggered home refreshes (reduces API storm under load). */
   var WS_HOME_THROTTLE_MS = 2500;
@@ -741,6 +741,19 @@
     document.getElementById('sessionTitle').textContent = titleModel + ' — ' + requests.length + ' turn(s)';
     var container = document.getElementById('threadMessages');
     container.innerHTML = '';
+    // Show system message once at the top of the thread (from first request that has one)
+    var systemMsg = null;
+    for (var si = 0; si < requests.length; si++) {
+      if (requests[si].system_message) { systemMsg = requests[si].system_message; break; }
+    }
+    if (systemMsg) {
+      var sysDiv = document.createElement('div');
+      sysDiv.className = 'thread-msg system';
+      sysDiv.innerHTML =
+        '<div class="role">System</div>' +
+        '<div class="body">' + escapeHtml(systemMsg) + '</div>';
+      container.appendChild(sysDiv);
+    }
     requests.forEach(function (req) {
       var reqId = req.request_id || '';
       var userTime = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
@@ -913,7 +926,11 @@
         metaRows.forEach(function (r) { metaHtml += '<tr><td class="meta-key">' + escapeHtml(String(r[0])) + '</td><td>' + escapeHtml(String(r[1])) + '</td></tr>'; });
         metaHtml += '</tbody></table>';
         document.querySelector('.detail-meta').innerHTML = metaHtml;
-        var detailParts = '--- Request (prompt) ---\n' + (req.prompt_text || '');
+        var detailParts = '';
+        if (req.system_message) {
+          detailParts += '--- System ---\n' + req.system_message + '\n\n';
+        }
+        detailParts += '--- Request (prompt) ---\n' + (req.prompt_text || '');
         if (req.thinking_text && req.thinking_text.trim()) {
           detailParts += '\n\n--- Thinking ---\n' + req.thinking_text.trim() + '\n\n--- Response ---\n' + (req.response_text || '');
         } else {

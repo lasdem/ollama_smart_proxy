@@ -316,6 +316,71 @@ class TestRequestLogRepository:
         assert result2.request_id == 'duplicate-req'
 
 
+class TestSystemMessageStorage:
+    """Test system message extraction and storage"""
+
+    def test_log_request_stores_system_message(self, request_repo):
+        """log_request should store system_message when provided"""
+        result = request_repo.log_request(
+            request_id="sys-msg-001",
+            source_ip="192.168.1.1",
+            model_name="llama3",
+            status="queued",
+            duration_seconds=0,
+            priority_score=100,
+            prompt_text="Hello",
+            system_message="You are a helpful assistant.",
+        )
+        assert result is not None
+        assert result.system_message == "You are a helpful assistant."
+
+    def test_log_request_without_system_message(self, request_repo):
+        """log_request should leave system_message null when not provided"""
+        result = request_repo.log_request(
+            request_id="sys-msg-002",
+            source_ip="192.168.1.1",
+            model_name="llama3",
+            status="queued",
+            duration_seconds=0,
+            priority_score=100,
+            prompt_text="Hello",
+        )
+        assert result is not None
+        assert result.system_message is None
+
+    def test_system_message_persists_on_update(self, request_repo):
+        """system_message set at enqueue should survive subsequent status updates"""
+        request_repo.log_request(
+            request_id="sys-msg-003",
+            source_ip="192.168.1.1",
+            model_name="llama3",
+            status="queued",
+            duration_seconds=0,
+            priority_score=100,
+            prompt_text="Hello",
+            system_message="Be concise.",
+        )
+        request_repo.log_request(
+            request_id="sys-msg-003",
+            source_ip="192.168.1.1",
+            model_name="llama3",
+            status="completed",
+            duration_seconds=1.5,
+            priority_score=100,
+            response_text="Hi!",
+        )
+        log = request_repo.get_request_log("sys-msg-003")
+        assert log is not None
+        assert log.system_message == "Be concise."
+
+    def test_system_message_column_exists(self, db_connection):
+        """The system_message column should exist in request_logs"""
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(db_connection.engine)
+        columns = {c["name"] for c in inspector.get_columns("request_logs")}
+        assert "system_message" in columns
+
+
 class TestAnalyticsRepository:
     """Test AnalyticsRepository analytics operations"""
     

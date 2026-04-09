@@ -65,6 +65,7 @@ class RequestLog(Base):
     user_agent = Column(String(512), nullable=True)  # From request header User-Agent
     thinking_text = Column(Text, nullable=True)  # Reasoning/thinking trace from thinking models
     request_body = Column(Text, nullable=True)  # Full request body (JSON string), truncated to ~64KB
+    system_message = Column(Text, nullable=True)  # System prompt from messages[role=system] or top-level 'system' field
 
     __table_args__ = (
         Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
@@ -259,6 +260,10 @@ class DatabaseConnection:
                     conn.execute(text("ALTER TABLE request_logs ADD COLUMN request_body TEXT"))
                     conn.commit()
                     logger.info("Added column request_logs.request_body")
+                if "system_message" not in existing:
+                    conn.execute(text("ALTER TABLE request_logs ADD COLUMN system_message TEXT"))
+                    conn.commit()
+                    logger.info("Added column request_logs.system_message")
                 # Add composite indexes if missing
                 existing_indexes = {idx["name"] for idx in inspector.get_indexes("request_logs")}
                 if "ix_ip_outgoing_fp" not in existing_indexes:

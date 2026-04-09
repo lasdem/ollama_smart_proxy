@@ -112,6 +112,9 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .session-thread h3 { margin: 0 0 0.75rem; font-size: 1rem; }
 .thread-msg { margin-bottom: 1rem; padding: 0.75rem; background: #252525; border-radius: 6px; border-left: 3px solid #0a7; }
 .thread-msg.user { border-left-color: #f80; }
+.thread-msg.system { border-left-color: #88f; background: #1e1e2e; }
+.thread-msg.system .role { color: #99f; }
+.thread-msg.system .body { color: #bbc; font-style: italic; }
 .thread-msg.thread-msg-live { border-left-color: #0f0; }
 .thread-msg.thread-msg-error { border-left-color: #c44; }
 .thread-msg.thread-msg-error .body { color: #f88; }
