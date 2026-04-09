@@ -12,6 +12,21 @@ Each entry should include:
 
 ---
 
+## 2026-04-09
+
+### v4.9.2 Collapsible conversation messages (Jupyter-style)
+- **Topic**: Dashboard Conversations UX — collapsible messages with left gutter.
+- **Summary**: Added Jupyter-style collapsible messages to the Conversations thread view. Each message gets a clickable vertical bar on the left that toggles collapse/expand. On first open, only the latest user+assistant pair is expanded; older messages show a one-line preview. Collapse state is sticky per-session — manual toggles persist across background refreshes and new streaming messages. State stored in-memory in `sessionCollapseState` map.
+- **Related Files**: `static/dashboard/app.js`, `static/dashboard/app.css`, `static/dashboard/index.html`, `docs/changelog/v4.9.2_COLLAPSIBLE_MESSAGES.md`
+
+### v4.9.1 Session fingerprint normalization (conversation chaining fix)
+- **Topic**: Multi-turn conversations appearing as separate sessions in the Conversations tab.
+- **Summary**: The Feedzai Assistant integration sends multi-turn conversations as separate HTTP requests with full message history. The proxy's content-based session chaining was failing because minor whitespace differences between stream-accumulated assistant content and the content echoed back by the client broke the SHA-256 fingerprint match. Added `_normalize_for_fingerprint()` to strip/collapse whitespace before hashing, applied at both the incoming (enqueue) and outgoing (stream completion) fingerprint sites.
+- **Key Findings**: Even a trailing newline in stream-accumulated content causes a completely different SHA-256 hash. Normalization (collapsing whitespace) makes the comparison robust to formatting differences while preserving content-based session separation.
+- **Related Files**: `src/smart_proxy.py`, `tests/test_session_fingerprint.py`, `docs/changelog/v4.9.1_SESSION_FINGERPRINT_FIX.md`
+
+---
+
 ## 2026-04-03
 
 ### .env.example inline documentation

@@ -35,6 +35,14 @@ import ollama_endpoints
 import json
 import hashlib
 
+
+def _normalize_for_fingerprint(text: str) -> str:
+    """Normalize message content for stable conversation fingerprinting.
+    Strips leading/trailing whitespace and collapses internal whitespace runs
+    so minor formatting differences between stream-accumulated content and
+    client-echoed history don't break session chaining."""
+    return " ".join(text.split())
+
 # Setup logging
 LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -323,7 +331,7 @@ async def enqueue_request(request: Request, path: str):
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
         if len(messages) > 1:
             # Normalize to list of {role, content} for stable fingerprint
-            prefix = [{"role": m.get("role", ""), "content": m.get("content", "")} for m in messages[:-1] if isinstance(m, dict)]
+            prefix = [{"role": m.get("role", ""), "content": _normalize_for_fingerprint(m.get("content", ""))} for m in messages[:-1] if isinstance(m, dict)]
             if prefix:
                 incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
                 existing = await asyncio.to_thread(
@@ -605,8 +613,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                         if status == "completed" and request.body.get("messages") and full_content is not None:
                             msgs = request.body.get("messages") or []
                             if isinstance(msgs, list):
-                                out_state = [{"role": (m.get("role") or ""), "content": (m.get("content") or "")} for m in msgs if isinstance(m, dict)]
-                                out_state.append({"role": "assistant", "content": full_content})
+                                out_state = [{"role": (m.get("role") or ""), "content": _normalize_for_fingerprint(m.get("content") or "")} for m in msgs if isinstance(m, dict)]
+                                out_state.append({"role": "assistant", "content": _normalize_for_fingerprint(full_content)})
                                 outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
                         await asyncio.to_thread(
                             request_repo.log_request,

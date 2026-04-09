@@ -648,6 +648,10 @@
   /** O(1) lookup for assistant rows while a thread is open (avoids repeated querySelectorAll per chunk). */
   var assistantRowByRid = {};
 
+  /** Per-session collapse state: { sid: { msgKey: true/false } } where true = collapsed.
+   *  msgKey = request_id + ':user' | request_id + ':assistant' | 'system'. */
+  var sessionCollapseState = {};
+
   function loadSessions() {
     var key = getKey();
     if (!key) { setAuthStatus(false, 'Set key first'); return; }
@@ -731,6 +735,27 @@
   });
 
   /* -- Thread view -- */
+
+  /** Add a gutter + preview to a message div.  Clicking the gutter toggles collapsed state. */
+  function addGutterAndPreview(msgDiv, msgKey, previewText, sid) {
+    var gutter = document.createElement('div');
+    gutter.className = 'thread-msg-gutter';
+    gutter.title = 'Click to collapse/expand';
+    msgDiv.insertBefore(gutter, msgDiv.firstChild);
+
+    var preview = document.createElement('div');
+    preview.className = 'thread-msg-preview';
+    preview.textContent = (previewText || '').slice(0, 120);
+    msgDiv.appendChild(preview);
+
+    gutter.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var isCollapsed = msgDiv.classList.toggle('collapsed');
+      if (!sessionCollapseState[sid]) sessionCollapseState[sid] = {};
+      sessionCollapseState[sid][msgKey] = isCollapsed;
+    });
+  }
+
   function showSessionThread(sid, requests) {
     currentSessionRequests = requests;
     currentSessionRequests._sid = sid;
@@ -741,17 +766,34 @@
     document.getElementById('sessionTitle').textContent = titleModel + ' — ' + requests.length + ' turn(s)';
     var container = document.getElementById('threadMessages');
     container.innerHTML = '';
+
+    // --- Collapse state: compute per-message defaults ---
+    var savedState = sessionCollapseState[sid] || null;
+    var newState = savedState ? Object.assign({}, savedState) : {};
+    var lastReq = requests.length ? requests[requests.length - 1] : null;
+    var lastReqId = lastReq ? (lastReq.request_id || '') : '';
+
+    function isCollapsed(msgKey, isLastPair) {
+      if (savedState && msgKey in savedState) return savedState[msgKey];
+      if (msgKey in newState) return newState[msgKey];
+      return !isLastPair;
+    }
+
     // Show system message once at the top of the thread (from first request that has one)
     var systemMsg = null;
     for (var si = 0; si < requests.length; si++) {
       if (requests[si].system_message) { systemMsg = requests[si].system_message; break; }
     }
     if (systemMsg) {
+      var sysKey = 'system';
+      var sysCollapsed = isCollapsed(sysKey, false);
       var sysDiv = document.createElement('div');
-      sysDiv.className = 'thread-msg system';
+      sysDiv.className = 'thread-msg system' + (sysCollapsed ? ' collapsed' : '');
       sysDiv.innerHTML =
         '<div class="role">System</div>' +
         '<div class="body">' + escapeHtml(systemMsg) + '</div>';
+      addGutterAndPreview(sysDiv, sysKey, systemMsg, sid);
+      newState[sysKey] = sysCollapsed;
       container.appendChild(sysDiv);
     }
     requests.forEach(function (req) {
@@ -759,21 +801,28 @@
       var userTime = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
       var asstDuration = fmtDurationShort(req.duration_seconds);
       var isLive = (req.status === 'processing' || req.status === 'queued');
+      var isLastPair = (reqId === lastReqId);
       // Determine assistant body: use live accumulated text if available, else API response_text or error_message
       var responseBody = '';
+      var responseRawText = '';
       if (liveAccumulated[reqId]) {
         responseBody = escapeHtml(liveAccumulated[reqId]);
+        responseRawText = liveAccumulated[reqId];
       } else {
         var respText = req.response_text || '';
         if (!respText && req.error_message) respText = req.error_message;
+        responseRawText = respText;
         responseBody = (respText && (respText.indexOf('[HTTP') === 0 || respText.indexOf('[Error]') === 0))
           ? escapeHtml(respText)
           : renderMarkdown(respText);
       }
       var isError = req.status === 'error';
+
       // User message
+      var userKey = reqId + ':user';
+      var userCollapsed = isCollapsed(userKey, isLastPair);
       var userDiv = document.createElement('div');
-      userDiv.className = 'thread-msg user';
+      userDiv.className = 'thread-msg user' + (userCollapsed ? ' collapsed' : '');
       userDiv.innerHTML =
         '<div class="role">User · ' + escapeHtml(req.ip_address || '') + ' · ' + escapeHtml(userTime) +
         ' <button class="meta-toggle" title="Show metadata">&#9432;</button></div>' +
@@ -789,8 +838,13 @@
           metaDiv.classList.add('hidden');
         }
       });
+      addGutterAndPreview(userDiv, userKey, req.prompt_text, sid);
+      newState[userKey] = userCollapsed;
       container.appendChild(userDiv);
-      // Assistant message: optional thinking block (collapsible; for past collapsed by default; for live open when thinking is streaming)
+
+      // Assistant message
+      var asstKey = reqId + ':assistant';
+      var asstCollapsed = isCollapsed(asstKey, isLastPair);
       var hasThinking = !!(req.thinking_text && req.thinking_text.trim());
       var liveThinking = isLive && (liveThinkingAccumulated[reqId] || '');
       var thinkingHtml = '';
@@ -801,7 +855,7 @@
         thinkingHtml = '<details class="thread-thinking' + (isLive ? ' thread-thinking-live' : '') + '"' + (thinkingOpen ? ' open' : '') + '><summary>Thinking</summary><pre class="thread-thinking-body' + (isLive ? ' streamable-thinking' : '') + '">' + thinkingEscaped + '</pre></details>';
       }
       var asstDiv = document.createElement('div');
-      asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
+      asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '') + (asstCollapsed ? ' collapsed' : '');
       asstDiv.setAttribute('data-request-id', reqId);
       if (reqId) assistantRowByRid[reqId] = asstDiv;
       var stopCtl = '';
@@ -819,8 +873,14 @@
         '</div>' +
         thinkingHtml +
         '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>';
+      addGutterAndPreview(asstDiv, asstKey, responseRawText, sid);
+      newState[asstKey] = asstCollapsed;
       container.appendChild(asstDiv);
     });
+
+    // Persist computed collapse state for this session
+    sessionCollapseState[sid] = newState;
+
     container.onclick = function (ev) {
       var btn = ev.target.closest && ev.target.closest('.conv-stop-btn');
       if (!btn) return;

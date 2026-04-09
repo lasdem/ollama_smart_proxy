@@ -3,6 +3,8 @@
 ---
 
 ## Done
+- [x] v4.9.2: Collapsible conversation messages — Jupyter-style left gutter to collapse/expand messages in thread view; old messages auto-collapsed, latest pair expanded; sticky state across refreshes (see changelog/v4.9.2_COLLAPSIBLE_MESSAGES.md)
+- [x] v4.9.1: Session fingerprint normalization — fix multi-turn conversation chaining when client-echoed assistant content has minor whitespace differences from stream-accumulated content (see changelog/v4.9.1_SESSION_FINGERPRINT_FIX.md)
 - [x] v4.9: System message display — extract, store, and show system prompts in conversations and request detail (see changelog/v4.9_SYSTEM_MESSAGE.md)
 - [x] v4.8: Precomputed analytics rollups, histogram API + dashboard tab, admin DB purge, migration v4 backfill (see changelog/v4.8_ANALYTICS_ROLLUPS.md)
 - [x] v4.7.4: Dashboard — autoscroll thinking `<pre>` during streaming (see changelog/v4.7.4_THINKING_AUTOSCROLL.md)
