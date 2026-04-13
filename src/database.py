@@ -66,6 +66,11 @@ class RequestLog(Base):
     thinking_text = Column(Text, nullable=True)  # Reasoning/thinking trace from thinking models
     request_body = Column(Text, nullable=True)  # Full request body (JSON string), truncated to ~64KB
     system_message = Column(Text, nullable=True)  # System prompt from messages[role=system] or top-level 'system' field
+    tool_calls_json = Column(Text, nullable=True)  # JSON string of tool calls from assistant response
+    finish_reason = Column(String(50), nullable=True)  # e.g. "stop", "tool_calls", "length"
+    prompt_eval_count = Column(Integer, nullable=True)  # Input token count
+    eval_count = Column(Integer, nullable=True)  # Output token count
+    tools_available = Column(Text, nullable=True)  # JSON array of tool names from the request body
 
     __table_args__ = (
         Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
@@ -264,6 +269,17 @@ class DatabaseConnection:
                     conn.execute(text("ALTER TABLE request_logs ADD COLUMN system_message TEXT"))
                     conn.commit()
                     logger.info("Added column request_logs.system_message")
+                for col_name, col_ddl in [
+                    ("tool_calls_json", "TEXT"),
+                    ("finish_reason", "VARCHAR(50)"),
+                    ("prompt_eval_count", "INTEGER"),
+                    ("eval_count", "INTEGER"),
+                    ("tools_available", "TEXT"),
+                ]:
+                    if col_name not in existing:
+                        conn.execute(text(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_ddl}"))
+                        conn.commit()
+                        logger.info("Added column request_logs.%s", col_name)
                 # Add composite indexes if missing
                 existing_indexes = {idx["name"] for idx in inspector.get_indexes("request_logs")}
                 if "ix_ip_outgoing_fp" not in existing_indexes:

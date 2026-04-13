@@ -83,6 +83,76 @@
   function fmtDurationShort(v) { return v != null ? Math.round(v) + 's' : '—'; }
   function isEmptyPrompt(p) { return !p || p === 'N/A'; }
 
+  function renderToolCallsHtml(toolCallsJson) {
+    if (!toolCallsJson) return '';
+    var calls;
+    try { calls = JSON.parse(toolCallsJson); } catch (_) { return ''; }
+    if (!Array.isArray(calls) || calls.length === 0) return '';
+    var inner = calls.map(function (tc) {
+      var fn = (tc.function || tc);
+      var name = fn.name || '?';
+      var args = fn.arguments || '';
+      var prettyArgs = '';
+      try { prettyArgs = JSON.stringify(JSON.parse(args), null, 2); } catch (_) { prettyArgs = args; }
+      return '<div class="tool-call-item"><span class="tool-call-badge">' + escapeHtml(name) + '</span>' +
+        (prettyArgs ? '<pre class="tool-call-args">' + escapeHtml(prettyArgs) + '</pre>' : '') + '</div>';
+    }).join('');
+    return '<details class="thread-tool-calls"><summary>Tool Calls (' + calls.length + ')</summary>' + inner + '</details>';
+  }
+
+  function renderToolResultsFromBody(requestBody) {
+    if (!requestBody) return '';
+    var body;
+    try { body = JSON.parse(requestBody); } catch (_) { return ''; }
+    var msgs = body.messages;
+    if (!Array.isArray(msgs)) return '';
+    var toolMsgs = msgs.filter(function (m) { return m && m.role === 'tool'; });
+    if (toolMsgs.length === 0) return '';
+    var inner = toolMsgs.map(function (m) {
+      var callId = m.tool_call_id || '';
+      var content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+      var preview = content.length > 500 ? content.slice(0, 500) + '…' : content;
+      return '<div class="tool-result-item"><span class="tool-call-badge tool-result-badge">' + escapeHtml(callId || 'result') + '</span>' +
+        '<pre class="tool-call-args">' + escapeHtml(preview) + '</pre></div>';
+    }).join('');
+    return '<details class="thread-tool-calls thread-tool-results"><summary>Tool Results (' + toolMsgs.length + ')</summary>' + inner + '</details>';
+  }
+
+  /** Check if this request represents a tool result turn.
+   *  Primary: parse request_body and check last message role === "tool".
+   *  Fallback: when body is truncated/unparseable, check prompt_text prefix. */
+  function lastMessageIsToolResult(requestBody, promptText) {
+    if (requestBody) {
+      try {
+        var body = JSON.parse(requestBody);
+        var msgs = body.messages;
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          var last = msgs[msgs.length - 1];
+          return last && last.role === 'tool';
+        }
+      } catch (_) { /* body truncated or unparseable — fall through */ }
+    }
+    if (typeof promptText === 'string' && promptText.indexOf('[Tool result') === 0) return true;
+    return false;
+  }
+
+  function renderFinishReasonBadge(reason) {
+    if (!reason) return '';
+    var cls = 'finish-reason';
+    if (reason === 'stop') cls += ' finish-stop';
+    else if (reason === 'tool_calls') cls += ' finish-tool-calls';
+    else if (reason === 'length') cls += ' finish-length';
+    return ' <span class="' + cls + '">' + escapeHtml(reason) + '</span>';
+  }
+
+  function renderTokenInfo(req) {
+    var parts = [];
+    if (req.prompt_eval_count != null) parts.push('in: ' + req.prompt_eval_count);
+    if (req.eval_count != null) parts.push('out: ' + req.eval_count);
+    if (parts.length === 0) return '';
+    return ' <span class="token-info">' + parts.join(' · ') + ' tokens</span>';
+  }
+
   /* ---------- Tabs ---------- */
   document.querySelectorAll('.tabs button').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -112,7 +182,7 @@
   /** Narrow columns for faster /proxy/query_db (skip large TEXT blobs). */
   var FIELDS_HOME_RECENT = 'request_id,model,ip_address,status,duration_seconds,processing_time_seconds,queue_wait_seconds,timestamp_received,timestamp_completed,session_id,endpoint';
   /** Session list + thread: omit request_body (large); keep response/thinking for display. API uses key `model`. */
-  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score,system_message';
+  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score,system_message,tool_calls_json,finish_reason,prompt_eval_count,eval_count,tools_available,request_body';
   var DEBOUNCE_MS = 150;
   /** Min interval between WebSocket-triggered home refreshes (reduces API storm under load). */
   var WS_HOME_THROTTLE_MS = 2500;
@@ -434,8 +504,8 @@
           var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
           liveAccumulated[msg.request_id] = fullText;
           liveThinkingAccumulated[msg.request_id] = fullThinking;
-          // Batch DOM updates via requestAnimationFrame
-          pendingChunks[msg.request_id] = { kind: kind, fullText: fullText, fullThinking: fullThinking };
+          var fullToolCalls = msg.full_tool_calls || '';
+          pendingChunks[msg.request_id] = { kind: kind, fullText: fullText, fullThinking: fullThinking, fullToolCalls: fullToolCalls };
           if (!chunkRAF) {
             chunkRAF = requestAnimationFrame(flushChunkUpdates);
           }
@@ -525,7 +595,17 @@
           }
           var streamEl = row.querySelector('.body.streamable');
           if (streamEl) streamEl.textContent = info.fullText;
-          /* Do not collapse thinking when answer tokens arrive — user should still see streamed reasoning. */
+          if (info.fullToolCalls) {
+            var existingTc = row.querySelector('.thread-tool-calls');
+            var newTcHtml = renderToolCallsHtml(info.fullToolCalls);
+            if (newTcHtml) {
+              if (existingTc) { existingTc.outerHTML = newTcHtml; }
+              else {
+                var bodyEl2 = row.querySelector('.body');
+                if (bodyEl2) bodyEl2.insertAdjacentHTML('afterend', newTcHtml);
+              }
+            }
+          }
         }
         if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === rid; })) needScroll = true;
       }
@@ -648,7 +728,8 @@
   /** O(1) lookup for assistant rows while a thread is open (avoids repeated querySelectorAll per chunk). */
   var assistantRowByRid = {};
 
-  /** Per-session collapse state: { sid: { msgKey: true/false } } where true = collapsed.
+  /** Per-session manual collapse overrides: only stores keys the user explicitly toggled.
+   *  { sid: { msgKey: true/false } } where true = collapsed.
    *  msgKey = request_id + ':user' | request_id + ':assistant' | 'system'. */
   var sessionCollapseState = {};
 
@@ -767,16 +848,35 @@
     var container = document.getElementById('threadMessages');
     container.innerHTML = '';
 
-    // --- Collapse state: compute per-message defaults ---
-    var savedState = sessionCollapseState[sid] || null;
-    var newState = savedState ? Object.assign({}, savedState) : {};
-    var lastReq = requests.length ? requests[requests.length - 1] : null;
-    var lastReqId = lastReq ? (lastReq.request_id || '') : '';
+    // --- Collapse state: only manual toggles are persisted ---
+    var manualOverrides = sessionCollapseState[sid] || {};
 
-    function isCollapsed(msgKey, isLastPair) {
-      if (savedState && msgKey in savedState) return savedState[msgKey];
-      if (msgKey in newState) return newState[msgKey];
-      return !isLastPair;
+    // Find the "last meaningful pair": walk backward to find the last request
+    // that is NOT an intermediate tool-call turn (finish_reason !== 'tool_calls')
+    // and whose user message is a real user question (not a tool result).
+    var lastUserReqId = '';
+    var lastAnswerReqId = '';
+    for (var ri = requests.length - 1; ri >= 0; ri--) {
+      var r = requests[ri];
+      if (!lastAnswerReqId && r.finish_reason !== 'tool_calls') {
+        lastAnswerReqId = r.request_id || '';
+      }
+      if (!lastUserReqId && !lastMessageIsToolResult(r.request_body, r.prompt_text)) {
+        lastUserReqId = r.request_id || '';
+      }
+      if (lastAnswerReqId && lastUserReqId) break;
+    }
+
+    function isCollapsed(msgKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall) {
+      if (msgKey in manualOverrides) return manualOverrides[msgKey];
+      var parts = msgKey.split(':');
+      var half = parts[parts.length - 1];
+      if (half === 'user') {
+        if (isToolResult) return true;
+        return !isLastUserMsg;
+      }
+      if (isIntermediateToolCall) return true;
+      return !isLastAnswerMsg;
     }
 
     // Show system message once at the top of the thread (from first request that has one)
@@ -793,7 +893,6 @@
         '<div class="role">System</div>' +
         '<div class="body">' + escapeHtml(systemMsg) + '</div>';
       addGutterAndPreview(sysDiv, sysKey, systemMsg, sid);
-      newState[sysKey] = sysCollapsed;
       container.appendChild(sysDiv);
     }
     requests.forEach(function (req) {
@@ -801,7 +900,11 @@
       var userTime = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
       var asstDuration = fmtDurationShort(req.duration_seconds);
       var isLive = (req.status === 'processing' || req.status === 'queued');
-      var isLastPair = (reqId === lastReqId);
+      var isLastUserMsg = (reqId === lastUserReqId);
+      var isLastAnswerMsg = (reqId === lastAnswerReqId);
+      var isToolResult = lastMessageIsToolResult(req.request_body, req.prompt_text);
+      var isIntermediateToolCall = (req.finish_reason === 'tool_calls');
+
       // Determine assistant body: use live accumulated text if available, else API response_text or error_message
       var responseBody = '';
       var responseRawText = '';
@@ -818,15 +921,21 @@
       }
       var isError = req.status === 'error';
 
-      // User message
+      // User / Tool-result message
       var userKey = reqId + ':user';
-      var userCollapsed = isCollapsed(userKey, isLastPair);
+      var userCollapsed = isCollapsed(userKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall);
       var userDiv = document.createElement('div');
-      userDiv.className = 'thread-msg user' + (userCollapsed ? ' collapsed' : '');
+      var userCls = 'thread-msg ' + (isToolResult ? 'tool thread-msg-tool-turn' : 'user');
+      userDiv.className = userCls + (userCollapsed ? ' collapsed' : '');
+      var userRoleLabel = isToolResult ? 'Tool Result' : 'User';
+      var toolResultsInUserDiv = isToolResult ? renderToolResultsFromBody(req.request_body) : '';
+      var userBodyContent = isToolResult && toolResultsInUserDiv
+        ? toolResultsInUserDiv
+        : '<div class="body">' + escapeHtml(req.prompt_text || '') + '</div>';
       userDiv.innerHTML =
-        '<div class="role">User · ' + escapeHtml(req.ip_address || '') + ' · ' + escapeHtml(userTime) +
+        '<div class="role">' + userRoleLabel + ' · ' + escapeHtml(req.ip_address || '') + ' · ' + escapeHtml(userTime) +
         ' <button class="meta-toggle" title="Show metadata">&#9432;</button></div>' +
-        '<div class="body">' + escapeHtml(req.prompt_text || '') + '</div>' +
+        userBodyContent +
         '<div class="thread-meta hidden"></div>';
       userDiv.querySelector('.meta-toggle').addEventListener('click', function (e) {
         e.stopPropagation();
@@ -838,13 +947,12 @@
           metaDiv.classList.add('hidden');
         }
       });
-      addGutterAndPreview(userDiv, userKey, req.prompt_text, sid);
-      newState[userKey] = userCollapsed;
+      addGutterAndPreview(userDiv, userKey, isToolResult ? (req.prompt_text || 'Tool result') : req.prompt_text, sid);
       container.appendChild(userDiv);
 
       // Assistant message
       var asstKey = reqId + ':assistant';
-      var asstCollapsed = isCollapsed(asstKey, isLastPair);
+      var asstCollapsed = isCollapsed(asstKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall);
       var hasThinking = !!(req.thinking_text && req.thinking_text.trim());
       var liveThinking = isLive && (liveThinkingAccumulated[reqId] || '');
       var thinkingHtml = '';
@@ -855,7 +963,8 @@
         thinkingHtml = '<details class="thread-thinking' + (isLive ? ' thread-thinking-live' : '') + '"' + (thinkingOpen ? ' open' : '') + '><summary>Thinking</summary><pre class="thread-thinking-body' + (isLive ? ' streamable-thinking' : '') + '">' + thinkingEscaped + '</pre></details>';
       }
       var asstDiv = document.createElement('div');
-      asstDiv.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '') + (asstCollapsed ? ' collapsed' : '');
+      var asstCls = 'thread-msg' + (isIntermediateToolCall ? ' thread-msg-tool-turn' : '') + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
+      asstDiv.className = asstCls + (asstCollapsed ? ' collapsed' : '');
       asstDiv.setAttribute('data-request-id', reqId);
       if (reqId) assistantRowByRid[reqId] = asstDiv;
       var stopCtl = '';
@@ -866,20 +975,23 @@
           stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(reqId) + '" data-act="cancel">Cancel</button>';
         }
       }
+      var toolCallsHtml = renderToolCallsHtml(req.tool_calls_json);
+      var toolResultsHtml = isToolResult ? '' : renderToolResultsFromBody(req.request_body);
+      var finishBadge = isLive ? '' : renderFinishReasonBadge(req.finish_reason);
+      var tokenHtml = isLive ? '' : renderTokenInfo(req);
       asstDiv.innerHTML =
         '<div class="role">Assistant · ' + escapeHtml(req.model || '') + ' · ' +
         (isLive ? '<span class="streaming-indicator">streaming…</span>' : escapeHtml(asstDuration)) +
+        finishBadge + tokenHtml +
         stopCtl +
         '</div>' +
         thinkingHtml +
-        '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>';
+        toolResultsHtml +
+        '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>' +
+        toolCallsHtml;
       addGutterAndPreview(asstDiv, asstKey, responseRawText, sid);
-      newState[asstKey] = asstCollapsed;
       container.appendChild(asstDiv);
     });
-
-    // Persist computed collapse state for this session
-    sessionCollapseState[sid] = newState;
 
     container.onclick = function (ev) {
       var btn = ev.target.closest && ev.target.closest('.conv-stop-btn');
@@ -902,9 +1014,12 @@
       ['IP', req.ip_address],
       ['Model', req.model],
       ['Status', req.status],
+      ['Finish Reason', req.finish_reason],
       ['Duration', fmtDuration(req.duration_seconds)],
       ['Queue wait', fmtDuration(req.queue_wait_seconds)],
       ['Processing', fmtDuration(req.processing_time_seconds)],
+      ['Input tokens', req.prompt_eval_count],
+      ['Output tokens', req.eval_count],
       ['Priority', req.priority_score],
       ['Session', req.session_id],
       ['Endpoint', req.endpoint],
@@ -912,7 +1027,8 @@
       ['Received', req.timestamp_received],
       ['Started', req.timestamp_started],
       ['Completed', req.timestamp_completed],
-      ['Error', req.error_message]
+      ['Error', req.error_message],
+      ['Tools available', req.tools_available]
     ].filter(function (r) { return r[1] != null && r[1] !== ''; });
     var html = '<table class="inline-meta-table"><tbody>';
     rows.forEach(function (r) { html += '<tr><td class="meta-key">' + escapeHtml(String(r[0])) + '</td><td>' + escapeHtml(String(r[1])) + '</td></tr>'; });
@@ -942,17 +1058,19 @@
         (data.requests || []).forEach(function (req) {
           var tr = document.createElement('tr');
           var time = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
+          var toolIcon = req.tool_calls_json ? '<span class="tool-call-badge" title="Has tool calls">&#128295;</span>' : '';
+          var frBadge = req.finish_reason ? renderFinishReasonBadge(req.finish_reason) : '';
           tr.innerHTML =
             '<td><code>' + escapeHtml((req.request_id || '').slice(0, 12)) + '…</code></td>' +
             '<td>' + escapeHtml(time) + '</td>' +
             '<td>' + escapeHtml(req.model || '') + '</td>' +
             '<td>' + escapeHtml(req.ip_address || '') + '</td>' +
-            '<td>' + escapeHtml(req.status || '') + '</td>' +
+            '<td>' + escapeHtml(req.status || '') + frBadge + '</td>' +
             '<td>' + fmtDuration(req.duration_seconds) + '</td>' +
             '<td>' + fmtDuration(req.queue_wait_seconds) + '</td>' +
             '<td>' + fmtDuration(req.processing_time_seconds) + '</td>' +
             '<td>' + escapeHtml((req.session_id || '').slice(0, 16)) + '</td>' +
-            '<td>' + escapeHtml((req.endpoint || '').replace(/^\/+/, '')) + '</td>' +
+            '<td>' + escapeHtml((req.endpoint || '').replace(/^\/+/, '')) + toolIcon + '</td>' +
             '<td><a href="#" data-rid="' + escapeHtml(req.request_id) + '">Detail</a></td>';
           tr.querySelector('a').addEventListener('click', function (e) { e.preventDefault(); openDetail(req.request_id); });
           tbody.appendChild(tr);
@@ -975,12 +1093,15 @@
       .then(function (req) {
         var metaRows = [
           ['Request ID', req.request_id], ['IP', req.ip_address], ['Model', req.model],
-          ['Status', req.status], ['Duration (s)', req.duration_seconds],
+          ['Status', req.status], ['Finish Reason', req.finish_reason],
+          ['Duration (s)', req.duration_seconds],
           ['Queue wait (s)', req.queue_wait_seconds], ['Processing (s)', req.processing_time_seconds],
+          ['Input tokens', req.prompt_eval_count], ['Output tokens', req.eval_count],
           ['Priority score', req.priority_score], ['Session ID', req.session_id],
           ['Endpoint', req.endpoint], ['User-Agent', req.user_agent],
           ['Received', req.timestamp_received], ['Started', req.timestamp_started],
-          ['Completed', req.timestamp_completed], ['Error', req.error_message]
+          ['Completed', req.timestamp_completed], ['Error', req.error_message],
+          ['Tools available', req.tools_available]
         ].filter(function (r) { return r[1] != null && r[1] !== ''; });
         var metaHtml = '<table class="detail-meta-table"><tbody>';
         metaRows.forEach(function (r) { metaHtml += '<tr><td class="meta-key">' + escapeHtml(String(r[0])) + '</td><td>' + escapeHtml(String(r[1])) + '</td></tr>'; });
@@ -992,9 +1113,16 @@
         }
         detailParts += '--- Request (prompt) ---\n' + (req.prompt_text || '');
         if (req.thinking_text && req.thinking_text.trim()) {
-          detailParts += '\n\n--- Thinking ---\n' + req.thinking_text.trim() + '\n\n--- Response ---\n' + (req.response_text || '');
-        } else {
-          detailParts += '\n\n--- Response ---\n' + (req.response_text || '');
+          detailParts += '\n\n--- Thinking ---\n' + req.thinking_text.trim();
+        }
+        detailParts += '\n\n--- Response ---\n' + (req.response_text || '');
+        if (req.tool_calls_json) {
+          try {
+            var tcPretty = JSON.stringify(JSON.parse(req.tool_calls_json), null, 2);
+            detailParts += '\n\n--- Tool Calls ---\n' + tcPretty;
+          } catch (_) {
+            detailParts += '\n\n--- Tool Calls ---\n' + req.tool_calls_json;
+          }
         }
         document.getElementById('detailText').textContent = detailParts;
         var rawContent;

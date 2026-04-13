@@ -43,6 +43,55 @@ def _normalize_for_fingerprint(text: str) -> str:
     client-echoed history don't break session chaining."""
     return " ".join(text.split())
 
+
+def _normalize_tool_calls_for_fingerprint(tool_calls) -> list:
+    """Normalize tool_calls to a canonical form for fingerprinting.
+    Ollama sends: [{"function": {"name": "...", "arguments": {...}}}]
+    OpenAI sends: [{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}]
+    We extract only function name + sorted arguments to produce a stable hash
+    regardless of format."""
+    if not isinstance(tool_calls, list):
+        return []
+    normalized = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name", "")
+        args = fn.get("arguments", "")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        normalized.append({"function": {"name": name, "arguments": args}})
+    return normalized
+
+
+def _extract_text_from_content(content) -> str:
+    """Extract displayable text from a message content field.
+    Handles both plain strings and OpenAI multimodal content arrays."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif item.get("type") == "image_url":
+                    parts.append("[image]")
+                elif item.get("type") == "image":
+                    parts.append("[image]")
+                else:
+                    parts.append(f"[{item.get('type', 'unknown')}]")
+            elif isinstance(item, str):
+                parts.append(item)
+        return " ".join(parts) if parts else ""
+    return str(content) if content else ""
+
 # Setup logging
 LOG_FORMAT = os.getenv("LOG_FORMAT", "json").lower()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -311,17 +360,38 @@ async def enqueue_request(request: Request, path: str):
     # Extract prompt for logging: use the LAST user message (the new query in multi-turn conversations)
     prompt_text = "N/A"
     system_message = None
+    tools_available = None
     if "messages" in body:
         msgs = body['messages']
         if msgs and isinstance(msgs, list):
             last_msg = msgs[-1]
-            prompt_text = str(last_msg.get('content', '')) if isinstance(last_msg, dict) else str(last_msg)
+            if isinstance(last_msg, dict):
+                role = last_msg.get('role', '')
+                content = last_msg.get('content', '')
+                if role == 'tool':
+                    tc_id = last_msg.get('tool_call_id', '')
+                    prompt_text = f"[Tool result for {tc_id}] {_extract_text_from_content(content)}"
+                else:
+                    prompt_text = _extract_text_from_content(content)
+            else:
+                prompt_text = str(last_msg)
             for m in msgs:
                 if isinstance(m, dict) and m.get('role') == 'system':
                     system_message = str(m.get('content', ''))
                     break
     elif "prompt" in body:
         prompt_text = str(body['prompt'])
+    # Extract available tool names from the request body
+    raw_tools = body.get("tools")
+    if isinstance(raw_tools, list) and raw_tools:
+        tool_names = []
+        for t in raw_tools:
+            if isinstance(t, dict):
+                fn = t.get("function")
+                if isinstance(fn, dict) and fn.get("name"):
+                    tool_names.append(fn["name"])
+        if tool_names:
+            tools_available = json.dumps(tool_names)
 
     priority_score = tracker.calculate_priority(queued_req)
     # Content-based session: same session when request's message prefix matches a previous request's messages+response
@@ -330,8 +400,16 @@ async def enqueue_request(request: Request, path: str):
     try:
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
         if len(messages) > 1:
-            # Normalize to list of {role, content} for stable fingerprint
-            prefix = [{"role": m.get("role", ""), "content": _normalize_for_fingerprint(m.get("content", ""))} for m in messages[:-1] if isinstance(m, dict)]
+            prefix = []
+            for m in messages[:-1]:
+                if not isinstance(m, dict):
+                    continue
+                entry = {"role": m.get("role", ""), "content": _normalize_for_fingerprint(_extract_text_from_content(m.get("content", "")))}
+                if m.get("tool_calls"):
+                    entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
+                if m.get("tool_call_id"):
+                    entry["tool_call_id"] = m["tool_call_id"]
+                prefix.append(entry)
             if prefix:
                 incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
                 existing = await asyncio.to_thread(
@@ -346,13 +424,13 @@ async def enqueue_request(request: Request, path: str):
 
     queued_req.session_id = session_id
 
-    # Full request body for raw JSON view (truncate to ~64KB)
+    # Full request body for raw JSON view (truncate to ~256KB)
     request_body_str = None
     if raw_body:
         try:
             request_body_str = raw_body.decode("utf-8", errors="replace")
-            if len(request_body_str) > 65536:
-                request_body_str = request_body_str[:65536]
+            if len(request_body_str) > 262144:
+                request_body_str = request_body_str[:262144]
         except Exception:
             pass
 
@@ -364,6 +442,7 @@ async def enqueue_request(request: Request, path: str):
         user_agent=request.headers.get("user-agent"),
         request_body=request_body_str,
         system_message=system_message,
+        tools_available=tools_available,
     )
     
     async with queue_lock:
@@ -570,13 +649,17 @@ async def process_request(request: QueuedRequest, priority_score: int):
                 },
             )
 
-            def on_stream_done(rid: str, full_content: str, full_thinking: str):
+            def on_stream_done(rid: str, full_content: str, full_thinking: str, meta=None):
                 """Sync callback: schedule DB log + slot release so tee_stream finishes without awaiting DB."""
+                from stream_tap import StreamMetadata
+                if meta is None:
+                    meta = StreamMetadata()
 
                 async def _complete_stream():
                     try:
                         total_duration = time.time() - request.timestamp
                         processing_time = time.time() - start_time
+                        tc_json = meta.tool_calls_json()
                         if request.admin_abort:
                             response_text_val = "[Stopped by administrator]"
                             if full_content:
@@ -596,6 +679,10 @@ async def process_request(request: QueuedRequest, priority_score: int):
                                 endpoint=request.path,
                                 user_agent=request.raw_request.headers.get("user-agent"),
                                 thinking_text=full_thinking or None,
+                                tool_calls_json=tc_json,
+                                finish_reason=meta.finish_reason,
+                                prompt_eval_count=meta.prompt_eval_count,
+                                eval_count=meta.eval_count,
                             )
                             await broadcaster.request_completed(rid, "cancelled")
                             stats["failed_requests"] += 1
@@ -609,12 +696,33 @@ async def process_request(request: QueuedRequest, priority_score: int):
                             )
                             return
                         response_text_val = full_content if full_content else f"[HTTP {status_code}]"
+                        if not full_content and full_thinking:
+                            response_text_val = "[Thinking only — see details]"
+                        if not full_content and tc_json:
+                            try:
+                                tc_list = json.loads(tc_json)
+                                names = [tc.get("function", {}).get("name", "?") for tc in tc_list if isinstance(tc, dict)]
+                                response_text_val = f"[Tool calls: {', '.join(names)}]"
+                            except Exception:
+                                response_text_val = "[Tool calls]"
                         outgoing_fp = None
-                        if status == "completed" and request.body.get("messages") and full_content is not None:
+                        if status == "completed" and request.body.get("messages") and (full_content is not None or tc_json):
                             msgs = request.body.get("messages") or []
                             if isinstance(msgs, list):
-                                out_state = [{"role": (m.get("role") or ""), "content": _normalize_for_fingerprint(m.get("content") or "")} for m in msgs if isinstance(m, dict)]
-                                out_state.append({"role": "assistant", "content": _normalize_for_fingerprint(full_content)})
+                                out_state = []
+                                for m in msgs:
+                                    if not isinstance(m, dict):
+                                        continue
+                                    entry = {"role": (m.get("role") or ""), "content": _normalize_for_fingerprint(_extract_text_from_content(m.get("content") or ""))}
+                                    if m.get("tool_calls"):
+                                        entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
+                                    if m.get("tool_call_id"):
+                                        entry["tool_call_id"] = m["tool_call_id"]
+                                    out_state.append(entry)
+                                asst_entry = {"role": "assistant", "content": _normalize_for_fingerprint(full_content or "")}
+                                if tc_json:
+                                    asst_entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(json.loads(tc_json))
+                                out_state.append(asst_entry)
                                 outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
                         await asyncio.to_thread(
                             request_repo.log_request,
@@ -630,6 +738,10 @@ async def process_request(request: QueuedRequest, priority_score: int):
                             endpoint=request.path,
                             user_agent=request.raw_request.headers.get("user-agent"),
                             thinking_text=full_thinking or None,
+                            tool_calls_json=tc_json,
+                            finish_reason=meta.finish_reason,
+                            prompt_eval_count=meta.prompt_eval_count,
+                            eval_count=meta.eval_count,
                         )
                         await broadcaster.request_completed(rid, status)
                         if is_error:

@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from smart_proxy import _normalize_for_fingerprint
+from smart_proxy import _normalize_for_fingerprint, _normalize_tool_calls_for_fingerprint
 
 
 class TestNormalizeForFingerprint:
@@ -220,3 +220,142 @@ class TestFingerprintChaining:
         ]
         t3_incoming = self._compute_incoming_fp(t3_prefix)
         assert t2_outgoing == t3_incoming, "Turn 2 -> Turn 3 chain broken"
+
+
+class TestNormalizeToolCallsForFingerprint:
+    """Tests for tool_calls normalization across Ollama and OpenAI formats."""
+
+    def test_ollama_format_dict_arguments(self):
+        """Ollama sends arguments as a dict."""
+        tc = [{"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}]
+        result = _normalize_tool_calls_for_fingerprint(tc)
+        assert result == [{"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}]
+
+    def test_openai_format_string_arguments(self):
+        """OpenAI sends arguments as a JSON string, should be parsed to dict."""
+        tc = [{"id": "call_abc", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Berlin"}'}}]
+        result = _normalize_tool_calls_for_fingerprint(tc)
+        assert result == [{"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}]
+
+    def test_ollama_and_openai_produce_same_result(self):
+        """The core fix: same tool call in Ollama vs OpenAI format must normalize identically."""
+        ollama_tc = [{"function": {"name": "search", "arguments": {"query": "hello", "limit": 10}}}]
+        openai_tc = [{"id": "call_123", "type": "function", "function": {"name": "search", "arguments": '{"query": "hello", "limit": 10}'}}]
+        assert _normalize_tool_calls_for_fingerprint(ollama_tc) == _normalize_tool_calls_for_fingerprint(openai_tc)
+
+    def test_strips_id_and_type_fields(self):
+        """OpenAI-specific id/type fields should be dropped."""
+        tc = [{"id": "call_xyz", "type": "function", "function": {"name": "fn", "arguments": {}}}]
+        result = _normalize_tool_calls_for_fingerprint(tc)
+        assert "id" not in result[0]
+        assert "type" not in result[0]
+
+    def test_multiple_tool_calls(self):
+        tc = [
+            {"function": {"name": "fn1", "arguments": {"a": 1}}},
+            {"function": {"name": "fn2", "arguments": '{"b": 2}'}},
+        ]
+        result = _normalize_tool_calls_for_fingerprint(tc)
+        assert len(result) == 2
+        assert result[0] == {"function": {"name": "fn1", "arguments": {"a": 1}}}
+        assert result[1] == {"function": {"name": "fn2", "arguments": {"b": 2}}}
+
+    def test_empty_list(self):
+        assert _normalize_tool_calls_for_fingerprint([]) == []
+
+    def test_non_list_input(self):
+        assert _normalize_tool_calls_for_fingerprint(None) == []
+        assert _normalize_tool_calls_for_fingerprint("not a list") == []
+
+    def test_invalid_arguments_string(self):
+        """Non-JSON string arguments are kept as-is."""
+        tc = [{"function": {"name": "fn", "arguments": "not json"}}]
+        result = _normalize_tool_calls_for_fingerprint(tc)
+        assert result == [{"function": {"name": "fn", "arguments": "not json"}}]
+
+
+class TestToolCallFingerprintChaining:
+    """Verify that fingerprint chaining works when tool_calls are involved."""
+
+    @staticmethod
+    def _compute_outgoing_fp_with_tools(messages, assistant_content, tool_calls_from_stream=None):
+        out_state = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            entry = {"role": m.get("role") or "", "content": _normalize_for_fingerprint(m.get("content") or "")}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
+            if m.get("tool_call_id"):
+                entry["tool_call_id"] = m["tool_call_id"]
+            out_state.append(entry)
+        asst_entry = {"role": "assistant", "content": _normalize_for_fingerprint(assistant_content or "")}
+        if tool_calls_from_stream:
+            asst_entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(tool_calls_from_stream)
+        out_state.append(asst_entry)
+        return hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _compute_incoming_fp_with_tools(messages_prefix):
+        prefix = []
+        for m in messages_prefix:
+            if not isinstance(m, dict):
+                continue
+            entry = {"role": m.get("role", ""), "content": _normalize_for_fingerprint(m.get("content", ""))}
+            if m.get("tool_calls"):
+                entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
+            if m.get("tool_call_id"):
+                entry["tool_call_id"] = m["tool_call_id"]
+            prefix.append(entry)
+        return hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
+
+    def test_ollama_outgoing_matches_openai_incoming(self):
+        """Core scenario: proxy stores Ollama-format tool calls, client echoes OpenAI format."""
+        request1_messages = [
+            {"role": "user", "content": "What's the weather in Berlin?"},
+        ]
+        ollama_tool_calls = [
+            {"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}
+        ]
+        outgoing = self._compute_outgoing_fp_with_tools(
+            request1_messages, "", tool_calls_from_stream=ollama_tool_calls
+        )
+
+        openai_echoed_tool_calls = [
+            {"id": "call_abc123", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Berlin"}'}}
+        ]
+        request2_prefix = [
+            {"role": "user", "content": "What's the weather in Berlin?"},
+            {"role": "assistant", "content": "", "tool_calls": openai_echoed_tool_calls},
+        ]
+        incoming = self._compute_incoming_fp_with_tools(request2_prefix)
+
+        assert outgoing == incoming, "Ollama outgoing FP should match OpenAI incoming FP"
+
+    def test_tool_result_message_chains(self):
+        """Full tool-use cycle: user -> assistant(tool_call) -> tool(result) -> assistant."""
+        user_msg = {"role": "user", "content": "Weather?"}
+        ollama_tc = [{"function": {"name": "get_weather", "arguments": {"city": "NY"}}}]
+
+        outgoing_t1 = self._compute_outgoing_fp_with_tools([user_msg], "", ollama_tc)
+
+        openai_tc = [{"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "NY"}'}}]
+        tool_result = {"role": "tool", "content": "Sunny, 25C", "tool_call_id": "c1"}
+        request2_messages = [
+            user_msg,
+            {"role": "assistant", "content": "", "tool_calls": openai_tc},
+            tool_result,
+            {"role": "user", "content": "Thanks"},
+        ]
+        incoming_t2 = self._compute_incoming_fp_with_tools(request2_messages[:-1])
+
+        assert outgoing_t1 != incoming_t2, "Different conversation state should not match"
+
+    def test_argument_key_order_irrelevant(self):
+        """JSON key order in arguments should not affect fingerprint hash
+        (sort_keys=True in json.dumps handles this)."""
+        tc1 = [{"function": {"name": "fn", "arguments": {"b": 2, "a": 1}}}]
+        tc2 = [{"function": {"name": "fn", "arguments": '{"a": 1, "b": 2}'}}]
+        n1 = _normalize_tool_calls_for_fingerprint(tc1)
+        n2 = _normalize_tool_calls_for_fingerprint(tc2)
+        assert json.dumps(n1, sort_keys=True) == json.dumps(n2, sort_keys=True)

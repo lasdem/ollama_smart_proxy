@@ -400,6 +400,11 @@ async def query_db(
                 "thinking_text": record.thinking_text,
                 "request_body": record.request_body,
                 "system_message": record.system_message,
+                "tool_calls_json": record.tool_calls_json,
+                "finish_reason": record.finish_reason,
+                "prompt_eval_count": record.prompt_eval_count,
+                "eval_count": record.eval_count,
+                "tools_available": record.tools_available,
             }
             requests_data.append(record_dict)
         
@@ -462,6 +467,11 @@ async def proxy_request_detail(request: Request, request_id: str):
         "thinking_text": log.thinking_text,
         "request_body": log.request_body,
         "system_message": log.system_message,
+        "tool_calls_json": log.tool_calls_json,
+        "finish_reason": log.finish_reason,
+        "prompt_eval_count": log.prompt_eval_count,
+        "eval_count": log.eval_count,
+        "tools_available": log.tools_available,
     }
 
 

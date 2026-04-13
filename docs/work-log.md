@@ -12,6 +12,22 @@ Each entry should include:
 
 ---
 
+## 2026-04-13
+
+### v4.10.2 Fix tool-result collapse in conversations
+- **Topic**: Dashboard collapse logic — tool-result turns not collapsing by default
+- **Summary**: Three interacting bugs prevented tool-result messages from collapsing: (1) `request_body` stored in DB was truncated at 64KB, making JSON unparseable — `lastMessageIsToolResult()` always returned false; added fallback to check `prompt_text` prefix `[Tool result`; (2) `isCollapsed()` extracted the user/assistant half via `msgKey.split(':')[1]`, but request IDs contain colons (e.g. `qwen3.5:35b`), so the wrong segment was extracted and the user/assistant branch logic never matched; fixed to use last segment; (3) computed collapse defaults were persisted in `sessionCollapseState` alongside manual toggles, so stale defaults overrode fresh calculations on re-render; refactored to only persist manual gutter-click toggles. Also raised `request_body` truncation limit from 64KB to 256KB, and separated `isToolResult`/`isIntermediateToolCall` in collapse logic so tool-result user messages always collapse while their assistant responses can expand if they're the final answer.
+- **Key Findings**: Request IDs like `REQ0001_127.0.0.1_qwen3.5:35b_4e83` contain colons from the model name, breaking any `split(':')[1]` logic. The `prompt_text` field reliably has a `[Tool result for ...]` prefix set server-side, making it a robust fallback when `request_body` is truncated.
+- **Related Files**: `static/dashboard/app.js`, `static/dashboard/index.html`, `src/smart_proxy.py`
+
+### v4.10.1 Fix empty response from delta.reasoning (Qwen3 thinking models)
+- **Topic**: Stream tap — support `delta.reasoning` field in OpenAI-compatible streaming
+- **Summary**: When Ollama serves thinking models (e.g. Qwen3) via `/v1/chat/completions`, reasoning content is sent in `delta.reasoning` (not `delta.content`). The proxy was ignoring this field, causing responses to appear as `[HTTP 200]` with empty text. Fixed `extract_parts_from_ndjson` to read `delta.reasoning` and map it to the existing `("thinking", ...)` pipeline. Also updated `response_text_val` fallback in `smart_proxy.py`: when content is empty but thinking text exists, shows `[Thinking only — see details]` instead of `[HTTP 200]`.
+- **Key Findings**: Ollama uses `delta.reasoning` on the OpenAI-compat endpoint but `message.thinking` on native `/api/chat`. The proxy already handled the native path; only the OpenAI-compat path was missing.
+- **Related Files**: `src/stream_tap.py`, `src/smart_proxy.py`, `tests/test_stream_tap.py`
+
+---
+
 ## 2026-04-09
 
 ### v4.9.2 Collapsible conversation messages (Jupyter-style)

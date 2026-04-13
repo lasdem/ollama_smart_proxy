@@ -37,15 +37,19 @@ class LiveBroadcaster:
                     })
                     acc = data.get("accumulated", "")
                     acc_thinking = data.get("accumulated_thinking", "")
-                    if acc or acc_thinking:
-                        await ws.send_json({
+                    acc_tc = data.get("accumulated_tool_calls", "")
+                    if acc or acc_thinking or acc_tc:
+                        payload = {
                             "type": "chunk",
                             "request_id": request_id,
                             "delta": "",
                             "full": acc,
                             "kind": "content",
                             "full_thinking": acc_thinking,
-                        })
+                        }
+                        if acc_tc:
+                            payload["full_tool_calls"] = acc_tc
+                        await ws.send_json(payload)
                 except Exception as e:
                     logger.warning("broadcaster send snapshot to new client failed: %s", e)
 
@@ -63,6 +67,7 @@ class LiveBroadcaster:
                 "metadata": metadata or {},
                 "accumulated": "",
                 "accumulated_thinking": "",
+                "accumulated_tool_calls": "",
             }
         await self._broadcast({
             "type": "request_started",
@@ -73,31 +78,43 @@ class LiveBroadcaster:
     async def chunk(self, request_id: str, delta: str, kind: str = "content") -> None:
         full_content: Optional[str] = None
         full_thinking: Optional[str] = None
+        full_tool_calls: Optional[str] = None
         async with self._lock:
             if request_id in self._active:
+                state = self._active[request_id]
                 if kind == "thinking":
-                    acc = self._active[request_id]["accumulated_thinking"] + delta
+                    acc = state["accumulated_thinking"] + delta
                     if len(acc) > self._max_accumulated:
                         acc = acc[-self._max_accumulated:]
-                    self._active[request_id]["accumulated_thinking"] = acc
+                    state["accumulated_thinking"] = acc
                     full_thinking = acc
-                    full_content = self._active[request_id]["accumulated"]
+                    full_content = state["accumulated"]
+                elif kind == "tool_calls":
+                    state["accumulated_tool_calls"] = delta
+                    full_tool_calls = delta
+                    full_content = state["accumulated"]
+                    full_thinking = state["accumulated_thinking"]
                 else:
-                    acc = self._active[request_id]["accumulated"] + delta
+                    acc = state["accumulated"] + delta
                     if len(acc) > self._max_accumulated:
                         acc = acc[-self._max_accumulated:]
-                    self._active[request_id]["accumulated"] = acc
+                    state["accumulated"] = acc
                     full_content = acc
-                    full_thinking = self._active[request_id]["accumulated_thinking"]
+                    full_thinking = state["accumulated_thinking"]
+                if full_tool_calls is None:
+                    full_tool_calls = state.get("accumulated_tool_calls") or ""
         if full_content is not None or full_thinking is not None:
-            await self._broadcast({
+            payload: Dict[str, Any] = {
                 "type": "chunk",
                 "request_id": request_id,
                 "delta": delta,
                 "full": full_content or "",
                 "kind": kind,
                 "full_thinking": full_thinking or "",
-            })
+            }
+            if full_tool_calls:
+                payload["full_tool_calls"] = full_tool_calls
+            await self._broadcast(payload)
 
     async def request_completed(self, request_id: str, status: str) -> None:
         async with self._lock:

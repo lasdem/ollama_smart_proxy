@@ -130,9 +130,10 @@ main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .thread-msg.collapsed .thread-msg-gutter::after { background: #666; height: 40%; }
 .thread-msg.collapsed .thread-msg-gutter:hover::after { background: #0af; }
 
-/* Collapsed message: hide body, thinking, metadata; show preview */
+/* Collapsed message: hide body, thinking, metadata, tool-calls; show preview */
 .thread-msg.collapsed .body { display: none; }
 .thread-msg.collapsed .thread-thinking { display: none; }
+.thread-msg.collapsed .thread-tool-calls { display: none; }
 .thread-msg.collapsed .thread-meta { display: none !important; }
 .thread-msg.collapsed .role { margin-bottom: 0; }
 .thread-msg-preview { display: none; font-size: 0.8rem; color: #666; margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
@@ -232,5 +233,33 @@ td a:hover { text-decoration: underline; }
   border-radius: 2px;
   background: #666;
 }
+/* Tool calls display */
+.thread-tool-calls { margin-bottom: 0.5rem; font-size: 0.85rem; }
+.thread-tool-calls summary { cursor: pointer; color: #f80; font-weight: 500; }
+.thread-tool-results summary { color: #0a7; }
+.tool-call-item, .tool-result-item { margin: 0.35rem 0; padding: 0.4rem; background: #1e1e1e; border-radius: 4px; border-left: 2px solid #f80; }
+.tool-result-item { border-left-color: #0a7; }
+.tool-call-badge { display: inline-block; background: #f80; color: #000; font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 3px; font-weight: 600; vertical-align: middle; }
+.tool-result-badge { background: #0a7; }
+.tool-call-args { white-space: pre-wrap; margin: 0.25rem 0 0; padding: 0.35rem; background: #151515; border-radius: 3px; color: #aaa; font-size: 0.82em; max-height: 10rem; overflow-y: auto; }
+
+/* Finish reason badges */
+.finish-reason { display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 3px; font-weight: 600; vertical-align: middle; margin-left: 0.35rem; }
+.finish-stop { background: #0a7; color: #000; }
+.finish-tool-calls { background: #f80; color: #000; }
+.finish-length { background: #c44; color: #fff; }
+
+/* Token info */
+.token-info { font-size: 0.7rem; color: #888; margin-left: 0.35rem; }
+
+/* Tool role messages (in thread) */
+.thread-msg.tool { border-left-color: #0a7; background: #1a2a1e; }
+.thread-msg.tool .role { color: #0a7; }
+
+/* Intermediate tool-use turns: compact and subdued */
+.thread-msg.thread-msg-tool-turn { padding: 0.35rem 0.75rem 0.35rem 1.75rem; opacity: 0.8; border-left-width: 2px; }
+.thread-msg.thread-msg-tool-turn .role { font-size: 0.7rem; }
+.thread-msg.thread-msg-tool-turn .body { font-size: 0.82rem; }
+
 .admin-purge-label { display: block; margin-bottom: 0.35rem; font-size: 0.9rem; color: #ccc; cursor: pointer; }
 .admin-purge-label input { margin-right: 0.5rem; }

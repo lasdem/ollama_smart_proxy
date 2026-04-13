@@ -134,7 +134,7 @@ class RequestLogRepository:
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None) -> Optional[RequestLog]:
         """
         Log or update a request
 
@@ -198,6 +198,16 @@ class RequestLogRepository:
                     request_log.request_body = request_body
                 if system_message is not None:
                     request_log.system_message = system_message
+                if tool_calls_json is not None:
+                    request_log.tool_calls_json = tool_calls_json
+                if finish_reason is not None:
+                    request_log.finish_reason = finish_reason
+                if prompt_eval_count is not None:
+                    request_log.prompt_eval_count = prompt_eval_count
+                if eval_count is not None:
+                    request_log.eval_count = eval_count
+                if tools_available is not None:
+                    request_log.tools_available = tools_available
 
                 if status == "completed":
                     request_log.timestamp_completed = datetime.utcnow()
@@ -226,6 +236,11 @@ class RequestLogRepository:
                     thinking_text=thinking_text,
                     request_body=request_body,
                     system_message=system_message,
+                    tool_calls_json=tool_calls_json,
+                    finish_reason=finish_reason,
+                    prompt_eval_count=prompt_eval_count,
+                    eval_count=eval_count,
+                    tools_available=tools_available,
                 )
                 session.add(request_log)
             
