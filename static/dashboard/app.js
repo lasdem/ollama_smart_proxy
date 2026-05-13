@@ -165,6 +165,7 @@
       // Auto-refresh data when switching tabs
       if (tab === 'home' && getKey()) loadHome();
       if (tab === 'conversations' && getKey()) loadSessions();
+      if (tab === 'history' && getKey()) loadHistory(false);
       if (tab === 'histogram') loadHistogram();
     });
   });
@@ -184,6 +185,10 @@
   /** Session list + thread: omit request_body (large); keep response/thinking for display. API uses key `model`. */
   var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score,system_message,tool_calls_json,finish_reason,prompt_eval_count,eval_count,tools_available,request_body';
   var DEBOUNCE_MS = 150;
+  /** Request History tab: offset for /proxy/query_db pagination */
+  var historyPageOffset = 0;
+  /** Conversations tab: offset for /proxy/conversation_sessions */
+  var convPageOffset = 0;
   /** Min interval between WebSocket-triggered home refreshes (reduces API storm under load). */
   var WS_HOME_THROTTLE_MS = 2500;
   var lastWsHomeRefresh = 0;
@@ -733,6 +738,52 @@
    *  msgKey = request_id + ':user' | request_id + ':assistant' | 'system'. */
   var sessionCollapseState = {};
 
+  function updateConvPager(data) {
+    var pager = document.getElementById('convPager');
+    var meta = document.getElementById('convPagerMeta');
+    var prev = document.getElementById('convPrev');
+    var next = document.getElementById('convNext');
+    if (!pager || !meta) return;
+    var total = data.total_count != null ? data.total_count : 0;
+    var offset = data.offset != null ? data.offset : 0;
+    var count = (data.sessions || []).length;
+    if (total === 0 && count === 0) {
+      pager.classList.add('hidden');
+      return;
+    }
+    pager.classList.remove('hidden');
+    var metaText;
+    if (count === 0 && total > 0) {
+      metaText = 'No conversations on this page — use Previous';
+    } else {
+      var start = total === 0 ? 0 : offset + 1;
+      var end = offset + count;
+      metaText = 'Showing ' + start + '–' + end + ' of ' + total + ' conversation(s)';
+    }
+    meta.textContent = metaText;
+    if (prev) prev.disabled = offset <= 0;
+    if (next) next.disabled = offset + count >= total;
+  }
+
+  function fetchSessionThread(sid) {
+    var key = getKey();
+    if (!key) return Promise.reject(new Error('No key'));
+    var qid = encodeURIComponent(sid === 'no-session' ? 'no-session' : sid);
+    return fetch(API_BASE + '/query_db?session_id=' + qid + '&limit=500&sort_by=timestamp_received&sort_order=asc&fields=' + encodeURIComponent(FIELDS_SESSION_LIST), { headers: apiHeaders() })
+      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
+      .then(function (data) {
+        var reqs = (data.requests || []).slice();
+        reqs.sort(function (a, b) { return (a.timestamp_received || '').localeCompare(b.timestamp_received || ''); });
+        return reqs;
+      });
+  }
+
+  function openSessionFromList(sid) {
+    fetchSessionThread(sid).then(function (reqs) {
+      showSessionThread(sid, reqs);
+    }).catch(function (e) { alert('Failed to open conversation: ' + (e.message || e)); });
+  }
+
   function loadSessions() {
     var key = getKey();
     if (!key) { setAuthStatus(false, 'Set key first'); return; }
@@ -740,74 +791,75 @@
     var limit = (limitEl && limitEl.value) ? parseInt(limitEl.value, 10) : 100;
     if (isNaN(limit) || limit < 1) limit = 100;
     if (limit > 500) limit = 500;
-    fetch(API_BASE + '/query_db?limit=' + limit + '&sort_by=timestamp_received&sort_order=desc&fields=' + encodeURIComponent(FIELDS_SESSION_LIST), { headers: apiHeaders() })
+    var offset = convPageOffset;
+    fetch(API_BASE + '/conversation_sessions?limit=' + limit + '&offset=' + offset, { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
-        var bySession = {};
-        (data.requests || []).forEach(function (req) {
-          var sid = req.session_id || 'no-session';
-          if (!bySession[sid]) bySession[sid] = [];
-          bySession[sid].push(req);
-        });
-        // Sort turns within each session chronologically
-        Object.keys(bySession).forEach(function (sid) {
-          bySession[sid].sort(function (a, b) { return (a.timestamp_received || '').localeCompare(b.timestamp_received || ''); });
-        });
-
-        // Filter out sessions where ALL requests have empty/N/A prompts (warmup/loading)
-        Object.keys(bySession).forEach(function (sid) {
-          var allEmpty = bySession[sid].every(function (r) { return isEmptyPrompt(r.prompt_text); });
-          if (allEmpty) delete bySession[sid];
-        });
-
-        // Build session list
+        if (data.offset != null) convPageOffset = data.offset;
+        updateConvPager(data);
         var listEl = document.getElementById('sessionList');
         listEl.innerHTML = '';
-        var sessionIds = Object.keys(bySession).sort(function (a, b) {
-          var ra = bySession[a], rb = bySession[b];
-          var ta = ra.length && ra[ra.length - 1].timestamp_received ? ra[ra.length - 1].timestamp_received : '';
-          var tb = rb.length && rb[rb.length - 1].timestamp_received ? rb[rb.length - 1].timestamp_received : '';
-          return tb.localeCompare(ta);
-        });
-        sessionIds.forEach(function (sid) {
-          var reqs = bySession[sid];
-          var first = reqs[0];
-          var last = reqs[reqs.length - 1];
-          var time = last.timestamp_received ? new Date(last.timestamp_received).toLocaleString() : '';
-          var preview = (first.prompt_text || '').slice(0, 80);
-          if (first.prompt_text && first.prompt_text.length > 80) preview += '…';
-          var inProgress = reqs.some(function (r) { return r.status === 'processing' || r.status === 'queued'; });
+        (data.sessions || []).forEach(function (sess) {
+          var sid = sess.session_id != null && sess.session_id !== '' ? sess.session_id : 'no-session';
+          var time = sess.last_timestamp_received ? new Date(sess.last_timestamp_received).toLocaleString() : '';
+          var preview = (sess.preview_prompt || '').slice(0, 80);
+          if (sess.preview_prompt && sess.preview_prompt.length > 80) preview += '…';
+          var inProgress = !!sess.has_live;
           var item = document.createElement('div');
           item.className = 'session-item' + (inProgress ? ' session-live' : '');
           item.innerHTML =
-            '<div class="session-header"><strong>' + escapeHtml(first.model || '') + '</strong> · ' +
-            reqs.length + ' turn(s) · ' + escapeHtml(time) +
+            '<div class="session-header"><strong>' + escapeHtml(sess.model || '') + '</strong> · ' +
+            (sess.turn_count || 0) + ' turn(s) · ' + escapeHtml(time) +
             (inProgress ? ' <span class="live-badge">live</span>' : '') +
             '</div><div class="session-preview">' + escapeHtml(preview) + '</div>';
-          item.addEventListener('click', function () { showSessionThread(sid, reqs); });
+          item.addEventListener('click', function () { openSessionFromList(sid); });
           listEl.appendChild(item);
         });
 
-        // If we're viewing a thread, refresh it — but NOT while actively streaming
-        // (streaming content lives in liveAccumulated and would be clobbered by stale DB data)
-        if (currentSessionRequests && bySession[currentSessionRequests._sid] && !hasActiveStreaming()) {
-          showSessionThread(currentSessionRequests._sid, bySession[currentSessionRequests._sid]);
+        if (currentSessionRequests && currentSessionRequests._sid && !hasActiveStreaming()) {
+          var sidOpen = currentSessionRequests._sid;
+          fetchSessionThread(sidOpen).then(function (reqs) {
+            showSessionThread(sidOpen, reqs);
+          }).catch(function () { /* keep existing thread on transient errors */ });
         }
 
-        // Auto-open a session that just went live
-        if (pendingLiveOpen && bySession[pendingLiveOpen]) {
-          var sid = pendingLiveOpen;
+        if (pendingLiveOpen) {
+          var sidLive = pendingLiveOpen;
           pendingLiveOpen = null;
-          document.getElementById('sessionList').style.display = 'none';
-          document.getElementById('sessionThread').classList.remove('hidden');
-          showSessionThread(sid, bySession[sid]);
-        } else {
-          pendingLiveOpen = null;
+          fetchSessionThread(sidLive).then(function (reqs) {
+            document.getElementById('sessionList').style.display = 'none';
+            document.getElementById('sessionThread').classList.remove('hidden');
+            showSessionThread(sidLive, reqs);
+          }).catch(function () { /* list stays visible */ });
         }
       })
       .catch(function (e) { console.error('Load sessions failed:', e); });
   }
   document.getElementById('loadSessions').addEventListener('click', loadSessions);
+  var convPrev = document.getElementById('convPrev');
+  var convNext = document.getElementById('convNext');
+  if (convPrev) {
+    convPrev.addEventListener('click', function () {
+      if (!getKey()) return;
+      var limitEl = document.getElementById('convLimit');
+      var lim = (limitEl && limitEl.value) ? parseInt(limitEl.value, 10) : 100;
+      if (isNaN(lim) || lim < 1) lim = 100;
+      if (lim > 500) lim = 500;
+      convPageOffset = Math.max(0, convPageOffset - lim);
+      loadSessions();
+    });
+  }
+  if (convNext) {
+    convNext.addEventListener('click', function () {
+      if (!getKey()) return;
+      var limitEl = document.getElementById('convLimit');
+      var lim = (limitEl && limitEl.value) ? parseInt(limitEl.value, 10) : 100;
+      if (isNaN(lim) || lim < 1) lim = 100;
+      if (lim > 500) lim = 500;
+      convPageOffset += lim;
+      loadSessions();
+    });
+  }
   document.getElementById('backToSessions').addEventListener('click', function () {
     document.getElementById('sessionThread').classList.add('hidden');
     document.getElementById('sessionList').style.display = '';
@@ -1039,20 +1091,64 @@
   /* ================================================================
      HISTORY
      ================================================================ */
-  function loadHistory() {
+  function parseHistoryLimit() {
+    var lim = parseInt(document.getElementById('limit').value, 10);
+    if (isNaN(lim) || lim < 1) lim = 100;
+    if (lim > 1000) lim = 1000;
+    return lim;
+  }
+
+  function updateHistoryPager(data) {
+    var pager = document.getElementById('historyPager');
+    var meta = document.getElementById('historyPagerMeta');
+    var prev = document.getElementById('historyPrev');
+    var next = document.getElementById('historyNext');
+    if (!pager || !meta) return;
+    var total = data.total_count != null ? data.total_count : 0;
+    var offset = data.offset != null ? data.offset : historyPageOffset;
+    var count = (data.requests || []).length;
+    if (total === 0 && count === 0) {
+      pager.classList.add('hidden');
+      return;
+    }
+    pager.classList.remove('hidden');
+    var metaText;
+    if (count === 0 && total > 0) {
+      metaText = 'No requests on this page — use Previous';
+    } else {
+      var start = total === 0 ? 0 : offset + 1;
+      var end = offset + count;
+      metaText = 'Showing ' + start + '–' + end + ' of ' + total + ' request(s)';
+    }
+    meta.textContent = metaText;
+    if (prev) prev.disabled = offset <= 0;
+    if (next) next.disabled = offset + count >= total;
+  }
+
+  function loadHistory(resetOffset) {
     var key = getKey();
-    if (!key) { setAuthStatus(false, 'Set key first'); return; }
-    var limit = document.getElementById('limit').value;
+    var pager = document.getElementById('historyPager');
+    if (!key) {
+      if (pager) pager.classList.add('hidden');
+      setAuthStatus(false, 'Set key first');
+      return;
+    }
+    if (resetOffset) historyPageOffset = 0;
+    var limit = parseHistoryLimit();
     var status = document.getElementById('filterStatus').value.trim();
     var model = document.getElementById('filterModel').value.trim();
     var ip = document.getElementById('filterIp').value.trim();
-    var url = API_BASE + '/query_db?limit=' + encodeURIComponent(limit);
+    var url = API_BASE + '/query_db?limit=' + encodeURIComponent(limit) +
+      '&offset=' + encodeURIComponent(historyPageOffset) +
+      '&sort_by=timestamp_received&sort_order=desc';
     if (status) url += '&status=' + encodeURIComponent(status);
     if (model) url += '&model=' + encodeURIComponent(model);
     if (ip) url += '&ip_address=' + encodeURIComponent(ip);
     fetch(url, { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
+        if (data.offset != null) historyPageOffset = data.offset;
+        updateHistoryPager(data);
         var tbody = document.querySelector('#historyTable tbody');
         tbody.innerHTML = '';
         (data.requests || []).forEach(function (req) {
@@ -1078,7 +1174,25 @@
       })
       .catch(function (e) { alert('Load failed: ' + e.message); });
   }
-  document.getElementById('loadHistory').addEventListener('click', loadHistory);
+  document.getElementById('loadHistory').addEventListener('click', function () { loadHistory(true); });
+  var historyPrev = document.getElementById('historyPrev');
+  var historyNext = document.getElementById('historyNext');
+  if (historyPrev) {
+    historyPrev.addEventListener('click', function () {
+      if (!getKey()) return;
+      var lim = parseHistoryLimit();
+      historyPageOffset = Math.max(0, historyPageOffset - lim);
+      loadHistory(false);
+    });
+  }
+  if (historyNext) {
+    historyNext.addEventListener('click', function () {
+      if (!getKey()) return;
+      var lim = parseHistoryLimit();
+      historyPageOffset += lim;
+      loadHistory(false);
+    });
+  }
 
   /* ================================================================
      DETAIL MODAL

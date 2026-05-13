@@ -72,7 +72,7 @@ flowchart TB
 |-----------|----------|------|
 | **FastAPI app** | `src/smart_proxy.py` | Creates app, lifespan (start VRAM monitor, queue worker, fallback recovery), injects dependencies, mounts routers. |
 | **Ollama router** | `src/ollama_endpoints.py` | Prefix: none. Handles `/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/completions` → enqueue; admin routes (`/api/pull`, `/api/push`, etc.) → verify admin + forward; catch-all → forward. |
-| **Proxy router** | `src/proxy_endpoints.py` | Prefix: `/proxy`. Health, queue status, VRAM status, query_db, query_db filters (incl. session_id), request detail `GET /proxy/requests/{request_id}`, WebSocket `/proxy/live` for live stream, dashboard `GET /proxy/dashboard` (and static assets), analytics, `GET /analytics/histogram`, `POST /admin/db/purge`, testing control, auth. |
+| **Proxy router** | `src/proxy_endpoints.py` | Prefix: `/proxy`. Health, queue status, VRAM status, `query_db` (filters incl. `session_id`; literal `no-session` matches NULL/blank session rows), `GET /proxy/conversation_sessions` (paginated session summaries for the dashboard), request detail `GET /proxy/requests/{request_id}`, WebSocket `/proxy/live` for live stream, dashboard `GET /proxy/dashboard` (and static assets), analytics, `GET /analytics/histogram`, `POST /admin/db/purge`, testing control, auth. |
 
 Dependencies (tracker, queue, VRAM monitor, admin settings, etc.) are injected from `smart_proxy.py` into the router modules via `inject_dependencies` / `set_dependencies`.
 
@@ -169,8 +169,8 @@ See `.env.example` for defaults and examples.
 
 ## 6. Security (Admin Endpoints)
 
-- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/analytics`, `/proxy/analytics/histogram`, `/proxy/admin/db/purge`, `/proxy/requests/*`; WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
-- **Dashboard (public UI, protected data):** `GET /proxy/dashboard` and `GET /proxy/dashboard/*` do **not** require auth, so users can load the page and enter the admin key in the browser. All dashboard data (query_db, request detail, live WebSocket) requires the key (header `X-Admin-Key` or query `?key=`) or IP/session.
+- **Protected paths:** `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/delete`, `/api/blobs` (and catch-all if path matches); `/proxy/query_db`, `/proxy/conversation_sessions`, `/proxy/analytics`, `/proxy/analytics/histogram`, `/proxy/admin/db/purge`, `/proxy/requests/*`; WebSocket `/proxy/live` (auth via query param `key=` or IP/session).
+- **Dashboard (public UI, protected data):** `GET /proxy/dashboard` and `GET /proxy/dashboard/*` do **not** require auth, so users can load the page and enter the admin key in the browser. All dashboard data (query_db, conversation_sessions, request detail, live WebSocket) requires the key (header `X-Admin-Key` or query `?key=`) or IP/session.
 - **Auth:** Static IPs from `ADMIN_IPS`, or IPs that have called `POST /proxy/auth` with correct `key` (24h TTL), or request header `X-Admin-Key` matching `PROXY_ADMIN_KEY`. WebSocket accepts same IP/session or `?key=PROXY_ADMIN_KEY`. Enforced by `verify_admin_access()` (and equivalent checks for WebSocket).
 
 ---

@@ -9,6 +9,8 @@ from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import func, case, or_, literal
+from sqlalchemy.orm import aliased
 
 from database import get_db, RequestLog
 from data_access import get_analytics_repo, get_request_log_repo
@@ -282,7 +284,7 @@ async def query_db(
     - status: Filter by status - comma-separated for multiple (completed, failed, processing, queued)
     - model: Filter by model name (partial match)
     - ip_address: Filter by IP address (partial match)
-    - session_id: Filter by session (conversation) id
+    - session_id: Filter by session (conversation) id. Use the literal value `no-session` to match rows with NULL or blank session_id (dashboard "no session" bucket).
     - from_time: Filter requests after this timestamp (ISO format)
     - to_time: Filter requests before this timestamp (ISO format)
     - sort_by: Sort by field (created_at, timestamp_completed, processing_time_seconds, queue_wait_seconds, priority_score, session_id)
@@ -340,7 +342,17 @@ async def query_db(
                 query = query.filter(RequestLog.source_ip == ip_address)
 
         if session_id:
-            query = query.filter(RequestLog.session_id == session_id)
+            # Dashboard groups NULL/blank session_id as "no-session"; match that bucket for thread fetch.
+            if session_id.strip() == "no-session":
+                query = query.filter(
+                    or_(
+                        RequestLog.session_id.is_(None),
+                        RequestLog.session_id == "",
+                        func.trim(RequestLog.session_id) == "",
+                    )
+                )
+            else:
+                query = query.filter(RequestLog.session_id == session_id)
 
         if from_time:
             try:
@@ -431,6 +443,100 @@ async def query_db(
     except Exception as e:
         logger.error(f"Failed to query database: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to query database: {str(e)}")
+
+
+@router.get("/conversation_sessions")
+async def conversation_sessions(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    Paginated list of conversations (grouped by session_id), newest activity first.
+    Excludes sessions where every prompt is empty, '', or 'N/A' (warmup), matching the dashboard.
+    Admin only.
+    """
+    _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+    db = get_db()
+    db_sess = db.get_session()
+    try:
+        first_row = aliased(RequestLog)
+        session_key = func.coalesce(func.nullif(func.trim(RequestLog.session_id), ""), literal("no-session"))
+        non_empty = case(
+            (
+                or_(
+                    RequestLog.prompt_text.is_(None),
+                    RequestLog.prompt_text == "",
+                    RequestLog.prompt_text == "N/A",
+                ),
+                0,
+            ),
+            else_=1,
+        )
+        grouped = (
+            db_sess.query(
+                session_key.label("session_key"),
+                func.count().label("turn_count"),
+                func.max(RequestLog.timestamp_received).label("last_ts"),
+                func.max(case((RequestLog.status.in_(["queued", "processing"]), 1), else_=0)).label("has_live"),
+                func.min(RequestLog.id).label("first_id"),
+            )
+            .group_by(session_key)
+            .having(func.sum(non_empty) > 0)
+            .subquery()
+        )
+        total_count = int(db_sess.query(func.count()).select_from(grouped).scalar() or 0)
+
+        rows = (
+            db_sess.query(
+                grouped.c.session_key,
+                grouped.c.turn_count,
+                grouped.c.last_ts,
+                grouped.c.has_live,
+                first_row.prompt_text,
+                first_row.model_name,
+            )
+            .select_from(grouped)
+            .join(first_row, first_row.id == grouped.c.first_id)
+            .order_by(grouped.c.last_ts.desc())
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
+
+        sessions_out = []
+        for row in rows:
+            sk_val = row.session_key
+            sessions_out.append(
+                {
+                    "session_id": None if sk_val == "no-session" else sk_val,
+                    "last_timestamp_received": row.last_ts.isoformat() if row.last_ts else None,
+                    "turn_count": int(row.turn_count or 0),
+                    "model": row.model_name or "",
+                    "preview_prompt": (row.prompt_text or "")[:500],
+                    "has_live": bool(row.has_live),
+                }
+            )
+
+        return {
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "count": len(sessions_out),
+            "sessions": sessions_out,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to list conversation sessions: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list conversation sessions: {e}")
+    finally:
+        db_sess.close()
 
 
 @router.get("/requests/{request_id}")

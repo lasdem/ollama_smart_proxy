@@ -203,6 +203,45 @@ class TestMonitoringEndpoints:
         for req in data["requests"]:
             assert "session_id" in req
 
+    def test_conversation_sessions_with_key(self):
+        """conversation_sessions returns paginated session summaries."""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_sessions",
+            headers=headers,
+            params={"limit": 5, "offset": 0},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+        assert "total_count" in data
+        assert data["limit"] == 5
+        assert data["offset"] == 0
+        for s in data["sessions"]:
+            assert "session_id" in s
+            assert "turn_count" in s
+            assert "has_live" in s
+            assert "preview_prompt" in s
+            assert "model" in s
+
+    def test_query_db_offset_returns_metadata(self):
+        """query_db honors offset and returns total_count for pagination UI."""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/query_db",
+            headers=headers,
+            params={"limit": 1, "offset": 0, "sort_by": "timestamp_received", "sort_order": "desc"},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "total_count" in data
+        assert "offset" in data
+        assert data["offset"] == 0
+        assert isinstance(data["total_count"], int)
+
 
 class TestAdminAuthentication:
     """Test admin authentication mechanisms"""

@@ -8,7 +8,7 @@
   <base href="/proxy/dashboard/">
   <title>Proxy Monitor — Ollama Smart Proxy</title>
   <!-- Bump ?v= when changing CSS so phones pick up updates even if cache misbehaves -->
-  <link rel="stylesheet" href="app.css?v=7">
+  <link rel="stylesheet" href="app.css?v=9">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -110,6 +110,13 @@
       <div class="conv-controls">
         <button id="loadSessions">Refresh</button>
         <label>Limit <input type="number" id="convLimit" value="100" min="1" max="500" /></label>
+        <div id="convPager" class="dash-pager dash-pager--inline hidden">
+          <span id="convPagerMeta" class="dash-pager-meta"></span>
+          <div class="dash-pager-actions">
+            <button type="button" id="convPrev" class="dash-pager-btn">Previous</button>
+            <button type="button" id="convNext" class="dash-pager-btn">Next</button>
+          </div>
+        </div>
         <span id="convWsIndicator" class="conv-ws-indicator"></span>
       </div>
       <div id="sessionList" class="session-list"></div>
@@ -121,11 +128,18 @@
     </section>
     <section id="history" class="tab-panel hidden">
       <div class="filters">
-        <label>Limit <input type="number" id="limit" value="100" min="1" max="1000" /></label>
         <label>Status <select id="filterStatus"><option value="">All</option><option value="completed">Completed</option><option value="error">Error</option><option value="processing">Processing</option><option value="queued">Queued</option><option value="failed">Failed</option></select></label>
         <label>Model <input type="text" id="filterModel" placeholder="partial match" /></label>
         <label>IP <input type="text" id="filterIp" placeholder="exact or 10.200.* for partial" /></label>
+        <label>Limit <input type="number" id="limit" value="100" min="1" max="1000" /></label>
         <button id="loadHistory">Load</button>
+        <div id="historyPager" class="dash-pager dash-pager--inline hidden">
+          <span id="historyPagerMeta" class="dash-pager-meta"></span>
+          <div class="dash-pager-actions">
+            <button type="button" id="historyPrev" class="dash-pager-btn">Previous</button>
+            <button type="button" id="historyNext" class="dash-pager-btn">Next</button>
+          </div>
+        </div>
       </div>
       <div class="table-wrap">
         <table id="historyTable">
@@ -230,6 +244,6 @@
       <pre id="detailRaw" class="detail-body hidden"></pre>
     </div>
   </div>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

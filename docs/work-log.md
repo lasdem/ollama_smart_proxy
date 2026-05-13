@@ -12,7 +12,14 @@ Each entry should include:
 
 ---
 
-## 2026-04-13
+## 2026-05-13
+
+### Dashboard pagination (Conversations + Request History)
+- **Topic:** Admin web dashboard — paginated lists
+- **Summary:** Request History uses `query_db` `offset` with Previous/Next and range text; Conversations list uses new `GET /proxy/conversation_sessions` (grouped sessions, warmup sessions excluded). Opening a conversation loads the full thread via `query_db?session_id=…`. `query_db` treats `session_id=no-session` as NULL/blank bucket for the merged “no session” thread.
+- **Related Files:** `src/proxy_endpoints.py`, `static/dashboard/index.html`, `static/dashboard/app.js`, `static/dashboard/app.css`, `tests/test_admin_dashboard.py`, `docs/changelog/v4.11_DASHBOARD_PAGINATION.md`, `docs/TODO.md`
+
+---
 
 ### v4.10.2 Fix tool-result collapse in conversations
 - **Topic**: Dashboard collapse logic — tool-result turns not collapsing by default
