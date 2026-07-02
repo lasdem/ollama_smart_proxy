@@ -381,6 +381,9 @@ async def enqueue_request(request: Request, path: str):
                     break
     elif "prompt" in body:
         prompt_text = str(body['prompt'])
+    elif "input" in body:
+        inp = body["input"]
+        prompt_text = json.dumps(inp) if isinstance(inp, list) else str(inp)
     # Extract available tool names from the request body
     raw_tools = body.get("tools")
     if isinstance(raw_tools, list) and raw_tools:
@@ -696,6 +699,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                             )
                             return
                         response_text_val = full_content if full_content else f"[HTTP {status_code}]"
+                        if not full_content and "embed" in request.path.lower() and not is_error:
+                            response_text_val = "[Embeddings response]"
                         if not full_content and full_thinking:
                             response_text_val = "[Thinking only — see details]"
                         if not full_content and tc_json:

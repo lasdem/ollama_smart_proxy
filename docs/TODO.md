@@ -3,6 +3,7 @@
 ---
 
 ## Done
+- [x] v4.12: Embedding usage logging — route `/api/embed`, `/api/embeddings`, `/v1/embeddings` through the queue so embedding models are logged to `request_logs` and rolled up into `analytics_*_by_model`; extract `input` field for prompt_text; friendlier `[Embeddings response]` label (see changelog/v4.12_EMBEDDING_USAGE_LOGGING.md)
 - [x] v4.11: Dashboard pagination — Request History uses `query_db` offset + pager; Conversations use `GET /proxy/conversation_sessions` + full-thread fetch by `session_id`; `query_db` supports `session_id=no-session` bucket (see changelog/v4.11_DASHBOARD_PAGINATION.md)
 - [x] v4.10.2: Fix tool-result collapse in conversations — tool-result turns were always expanded because: (1) `request_body` truncated at 64KB made JSON unparseable, so `lastMessageIsToolResult` always returned false — added `prompt_text` prefix fallback; (2) `isCollapsed` used `msgKey.split(':')[1]` but request IDs contain colons (e.g. `qwen3.5:35b`), extracting wrong segment — fixed to use last segment; (3) computed collapse defaults were persisted and overrode fresh calculations — only manual toggles are now saved; raised `request_body` truncation limit to 256KB
 - [x] v4.10.1: Fix empty response from delta.reasoning — Ollama's OpenAI-compat endpoint sends thinking content in `delta.reasoning` for Qwen3-style models; stream_tap now reads it as `("thinking", ...)` so it appears in the Thinking collapsible and DB; response_text_val shows `[Thinking only — see details]` instead of `[HTTP 200]` when only reasoning exists

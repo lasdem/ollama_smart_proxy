@@ -7,7 +7,9 @@ python-multipart==0.0.20
 # HTTP client
 httpx==0.28.1
 
-# PostgreSQL async support
+# PostgreSQL support
+# psycopg2 is the sync DBAPI used by create_engine("postgresql://...") in src/database.py
+psycopg2-binary==2.9.10
 asyncpg==0.31.0
 sqlalchemy[asyncio]==2.0.36
 

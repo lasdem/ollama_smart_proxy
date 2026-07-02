@@ -51,6 +51,22 @@ async def handle_openai_legacy(request: Request):
     return await _enqueue_request_func(request, "v1/completions")
 
 
+# --- Embedding Routes (queued + logged for usage analytics) ---
+@router.post("/api/embed")
+async def handle_ollama_embed(request: Request):
+    return await _enqueue_request_func(request, "api/embed")
+
+
+@router.post("/api/embeddings")
+async def handle_ollama_embeddings_legacy(request: Request):
+    return await _enqueue_request_func(request, "api/embeddings")
+
+
+@router.post("/v1/embeddings")
+async def handle_openai_embeddings(request: Request):
+    return await _enqueue_request_func(request, "v1/embeddings")
+
+
 # --- Protected Admin Routes ---
 @router.api_route("/api/pull", methods=["POST"])
 @router.api_route("/api/push", methods=["POST"])

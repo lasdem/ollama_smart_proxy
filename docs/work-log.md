@@ -12,6 +12,16 @@ Each entry should include:
 
 ---
 
+## 2026-07-02
+
+### v4.12 Embedding usage logging
+- **Topic**: Analytics — track embedding-model usage
+- **Summary**: Investigated which installed models could be pruned as "never used". Querying `analytics_daily_by_model` showed the only zero-usage models were the embedding models (`bge-m3`, `embeddinggemma`, `mxbai-embed-large`, `paraphrase-multilingual`). Traced this to the request path: only `/api/chat`, `/api/generate`, `/v1/chat/completions`, `/v1/completions` are enqueued/logged; embedding endpoints fell through the catch-all forwarder in `src/ollama_endpoints.py` with no logging, so their absence from analytics was an artifact, not evidence of disuse. Implemented logging by routing `/api/embed`, `/api/embeddings`, `/v1/embeddings` through `enqueue_request` (which drives `log_request` → rollups). Added `input`-field extraction for `prompt_text` and an `[Embeddings response]` label.
+- **Key Findings**: Rollups are driven entirely by `request_repo.log_request`, so anything reaching the queue worker is rolled up automatically. `tee_stream` passes non-chat responses through unchanged (extracts nothing), so embedding JSON reaches the client intact and is still logged completed/error by HTTP status. The VRAM monitor has no static table — it learns all models (including embeddings) from `/api/ps`, so embeddings are scheduled like any other model. The queue worker has no hard VRAM gate (only `OLLAMA_MAX_PARALLEL`), so unknown-VRAM models never deadlock.
+- **Related Files**: `src/ollama_endpoints.py`, `src/smart_proxy.py`, `tests/test_embeddings.py`, `docs/changelog/v4.12_EMBEDDING_USAGE_LOGGING.md`, `docs/TODO.md`
+
+---
+
 ## 2026-05-13
 
 ### Dashboard pagination (Conversations + Request History)
