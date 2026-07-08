@@ -17,7 +17,10 @@ from data_access import get_analytics_repo, get_request_log_repo
 
 # --- CONFIGURATION ---
 class TestConfig:
-    PROXY_URL = "http://localhost:8003"
+    # Mirror smart_proxy.py: PROXY_PORT env var (default 8003). The fixture forces this exact
+    # port into the spawned proxy's environment so the bound port and this URL always agree.
+    PROXY_PORT = int(os.getenv("PROXY_PORT", "8003"))
+    PROXY_URL = f"http://localhost:{PROXY_PORT}"
     ADMIN_KEY = os.getenv("PROXY_ADMIN_KEY", "test_admin_key_12345")
     TIMEOUT = 10.0
 
@@ -29,6 +32,9 @@ def start_proxy_service():
     """
     log_file = tempfile.NamedTemporaryFile(delete=False, mode="w+t", suffix="_proxy.log")
     proxy_env = os.environ.copy()
+    # Pin the subprocess to the port the tests target. load_dotenv() does not override existing
+    # env vars, so this wins over any PROXY_PORT in .env and keeps the two in sync.
+    proxy_env["PROXY_PORT"] = str(TestConfig.PROXY_PORT)
     proxy_proc = subprocess.Popen([
         sys.executable, "src/smart_proxy.py"
     ], stdout=log_file, stderr=subprocess.STDOUT, cwd=os.path.dirname(os.path.dirname(__file__)), env=proxy_env)
@@ -37,7 +43,7 @@ def start_proxy_service():
     ready = False
     for _ in range(60):
         try:
-            resp = requests.get("http://localhost:8003/proxy/health", timeout=1)
+            resp = requests.get(f"{TestConfig.PROXY_URL}/proxy/health", timeout=1)
             if resp.status_code == 200:
                 ready = True
                 break
@@ -225,6 +231,23 @@ class TestMonitoringEndpoints:
             assert "has_live" in s
             assert "preview_prompt" in s
             assert "model" in s
+
+    def test_conversation_sessions_accepts_model_and_ip_filters(self):
+        """conversation_sessions accepts model + ip_address filters and returns matching sessions."""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_sessions",
+            headers=headers,
+            params={"limit": 5, "offset": 0, "model": "nonexistent-model-xyz", "ip_address": "203.0.113.*"},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert "sessions" in data
+        assert isinstance(data["sessions"], list)
+        # Filtering by an implausible model/ip should yield no sessions.
+        assert data["total_count"] == 0
+        assert data["sessions"] == []
 
     def test_query_db_offset_returns_metadata(self):
         """query_db honors offset and returns total_count for pagination UI."""

@@ -271,10 +271,11 @@ td a:hover { text-decoration: underline; }
 .tool-call-args { white-space: pre-wrap; margin: 0.25rem 0 0; padding: 0.35rem; background: #151515; border-radius: 3px; color: #aaa; font-size: 0.82em; max-height: 10rem; overflow-y: auto; }
 
 /* Finish reason badges */
-.finish-reason { display: inline-block; font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 3px; font-weight: 600; vertical-align: middle; margin-left: 0.35rem; }
-.finish-stop { background: #0a7; color: #000; }
-.finish-tool-calls { background: #f80; color: #000; }
-.finish-length { background: #c44; color: #fff; }
+/* Non-interactive status labels. Outlined (not solid) so they don't read as action buttons. */
+.finish-reason { display: inline-block; font-size: 0.7rem; padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; vertical-align: middle; margin-left: 0.35rem; background: transparent; border: 1px solid currentColor; }
+.finish-stop { color: #4bd6a0; }
+.finish-tool-calls { color: #f80; }
+.finish-length { color: #e06666; }
 
 /* Token info */
 .token-info { font-size: 0.7rem; color: #888; margin-left: 0.35rem; }

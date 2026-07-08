@@ -450,11 +450,17 @@ async def conversation_sessions(
     request: Request,
     limit: int = 50,
     offset: int = 0,
+    model: Optional[str] = None,
+    ip_address: Optional[str] = None,
 ):
     """
     Paginated list of conversations (grouped by session_id), newest activity first.
     Excludes sessions where every prompt is empty, '', or 'N/A' (warmup), matching the dashboard.
     Admin only.
+
+    Query Parameters:
+    - model: Filter by model name (prefix match; use * as wildcard). Mirrors query_db.
+    - ip_address: Filter by IP address (exact, or use * for partial match). Mirrors query_db.
     """
     _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
     if limit < 1 or limit > 500:
@@ -478,14 +484,24 @@ async def conversation_sessions(
             ),
             else_=1,
         )
+        base = db_sess.query(
+            session_key.label("session_key"),
+            func.count().label("turn_count"),
+            func.max(RequestLog.timestamp_received).label("last_ts"),
+            func.max(case((RequestLog.status.in_(["queued", "processing"]), 1), else_=0)).label("has_live"),
+            func.min(RequestLog.id).label("first_id"),
+        )
+        # Filter matching rows before grouping (mirrors query_db semantics).
+        if model:
+            pattern = model.replace("*", "%") if "*" in model else f"{model}%"
+            base = base.filter(RequestLog.model_name.like(pattern))
+        if ip_address:
+            if "*" in ip_address:
+                base = base.filter(RequestLog.source_ip.like(ip_address.replace("*", "%")))
+            else:
+                base = base.filter(RequestLog.source_ip == ip_address)
         grouped = (
-            db_sess.query(
-                session_key.label("session_key"),
-                func.count().label("turn_count"),
-                func.max(RequestLog.timestamp_received).label("last_ts"),
-                func.max(case((RequestLog.status.in_(["queued", "processing"]), 1), else_=0)).label("has_live"),
-                func.min(RequestLog.id).label("first_id"),
-            )
+            base
             .group_by(session_key)
             .having(func.sum(non_empty) > 0)
             .subquery()

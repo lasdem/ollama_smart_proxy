@@ -780,7 +780,7 @@
 
   function openSessionFromList(sid) {
     fetchSessionThread(sid).then(function (reqs) {
-      showSessionThread(sid, reqs);
+      showSessionThread(sid, reqs, true);
     }).catch(function (e) { alert('Failed to open conversation: ' + (e.message || e)); });
   }
 
@@ -792,7 +792,14 @@
     if (isNaN(limit) || limit < 1) limit = 100;
     if (limit > 500) limit = 500;
     var offset = convPageOffset;
-    fetch(API_BASE + '/conversation_sessions?limit=' + limit + '&offset=' + offset, { headers: apiHeaders() })
+    var modelEl = document.getElementById('convFilterModel');
+    var ipEl = document.getElementById('convFilterIp');
+    var model = modelEl && modelEl.value ? modelEl.value.trim() : '';
+    var ip = ipEl && ipEl.value ? ipEl.value.trim() : '';
+    var url = API_BASE + '/conversation_sessions?limit=' + limit + '&offset=' + offset;
+    if (model) url += '&model=' + encodeURIComponent(model);
+    if (ip) url += '&ip_address=' + encodeURIComponent(ip);
+    fetch(url, { headers: apiHeaders() })
       .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
       .then(function (data) {
         if (data.offset != null) convPageOffset = data.offset;
@@ -819,7 +826,7 @@
         if (currentSessionRequests && currentSessionRequests._sid && !hasActiveStreaming()) {
           var sidOpen = currentSessionRequests._sid;
           fetchSessionThread(sidOpen).then(function (reqs) {
-            showSessionThread(sidOpen, reqs);
+            showSessionThread(sidOpen, reqs, false);
           }).catch(function () { /* keep existing thread on transient errors */ });
         }
 
@@ -829,13 +836,19 @@
           fetchSessionThread(sidLive).then(function (reqs) {
             document.getElementById('sessionList').style.display = 'none';
             document.getElementById('sessionThread').classList.remove('hidden');
-            showSessionThread(sidLive, reqs);
+            showSessionThread(sidLive, reqs, true);
           }).catch(function () { /* list stays visible */ });
         }
       })
       .catch(function (e) { console.error('Load sessions failed:', e); });
   }
-  document.getElementById('loadSessions').addEventListener('click', loadSessions);
+  document.getElementById('loadSessions').addEventListener('click', function () { convPageOffset = 0; loadSessions(); });
+  ['convFilterModel', 'convFilterIp'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', function () { convPageOffset = 0; loadSessions(); });
+    el.addEventListener('keydown', function (e) { if (e.key === 'Enter') { convPageOffset = 0; loadSessions(); } });
+  });
   var convPrev = document.getElementById('convPrev');
   var convNext = document.getElementById('convNext');
   if (convPrev) {
@@ -889,7 +902,7 @@
     });
   }
 
-  function showSessionThread(sid, requests) {
+  function showSessionThread(sid, requests, forceScroll) {
     currentSessionRequests = requests;
     currentSessionRequests._sid = sid;
     assistantRowByRid = {};
@@ -1057,7 +1070,17 @@
         : API_BASE + '/cancel-request/' + encodeURIComponent(rid);
       adminPost(url, undefined, function () { loadSessions(); loadHome(); });
     };
-    requestAnimationFrame(function () { scrollThreadToBottom(); });
+    // Only auto-scroll when explicitly requested (user open / live auto-open) or when
+    // THIS conversation is actively streaming. Prevents a background conversation's
+    // stream from scrolling the thread the user is currently reading.
+    var threadIsStreaming = requests.some(function (r) {
+      var rid = r.request_id;
+      return r.status === 'processing' || r.status === 'queued' ||
+        !!liveAccumulated[rid] || !!liveThinkingAccumulated[rid];
+    });
+    if (forceScroll || threadIsStreaming) {
+      requestAnimationFrame(function () { scrollThreadToBottom(); });
+    }
   }
 
   function buildInlineMeta(req) {
@@ -1156,6 +1179,15 @@
           var time = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
           var toolIcon = req.tool_calls_json ? '<span class="tool-call-badge" title="Has tool calls">&#128295;</span>' : '';
           var frBadge = req.finish_reason ? renderFinishReasonBadge(req.finish_reason) : '';
+          // Action button only for genuinely active rows: processing -> Stop, queued -> Cancel.
+          var actCtl = '';
+          if (getKey() && req.request_id) {
+            if (req.status === 'processing') {
+              actCtl = ' <button type="button" class="history-action-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(req.request_id) + '" data-act="stop">Stop</button>';
+            } else if (req.status === 'queued') {
+              actCtl = ' <button type="button" class="history-action-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(req.request_id) + '" data-act="cancel">Cancel</button>';
+            }
+          }
           tr.innerHTML =
             '<td><code>' + escapeHtml((req.request_id || '').slice(0, 12)) + '…</code></td>' +
             '<td>' + escapeHtml(time) + '</td>' +
@@ -1167,8 +1199,21 @@
             '<td>' + fmtDuration(req.processing_time_seconds) + '</td>' +
             '<td>' + escapeHtml((req.session_id || '').slice(0, 16)) + '</td>' +
             '<td>' + escapeHtml((req.endpoint || '').replace(/^\/+/, '')) + toolIcon + '</td>' +
-            '<td><a href="#" data-rid="' + escapeHtml(req.request_id) + '">Detail</a></td>';
+            '<td><a href="#" data-rid="' + escapeHtml(req.request_id) + '">Detail</a>' + actCtl + '</td>';
           tr.querySelector('a').addEventListener('click', function (e) { e.preventDefault(); openDetail(req.request_id); });
+          var actBtn = tr.querySelector('.history-action-btn');
+          if (actBtn) {
+            actBtn.addEventListener('click', function (e) {
+              e.preventDefault();
+              var rid = actBtn.getAttribute('data-rid');
+              var act = actBtn.getAttribute('data-act');
+              if (!rid || !getKey()) return;
+              var actUrl = act === 'stop'
+                ? API_BASE + '/stop-request/' + encodeURIComponent(rid)
+                : API_BASE + '/cancel-request/' + encodeURIComponent(rid);
+              adminPost(actUrl, undefined, function () { loadHistory(false); });
+            });
+          }
           tbody.appendChild(tr);
         });
       })

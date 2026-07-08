@@ -12,6 +12,16 @@ Each entry should include:
 
 ---
 
+## 2026-07-08
+
+### v4.13 Dashboard: Conversations filters, scroll fix, Request History Stop
+- **Topic**: Admin web dashboard — UX fixes
+- **Summary**: Three dashboard changes. (1) Added Model/IP filters to the Conversations tab, mirroring Request History; `conversation_sessions` now accepts `model` (prefix, `*` wildcard) and `ip_address` (exact or `*` partial), applied to rows before grouping. (2) Fixed thread auto-scroll: viewing a conversation no longer jumps to the bottom when a different conversation streams — `showSessionThread` gained a `forceScroll` param and only scrolls on explicit open or when the open thread itself is streaming. (3) Resolved the "Stop button on completed requests" confusion — the culprit was the `finish_reason` badge (`stop`) styled with the same solid green as action buttons; restyled `.finish-reason` badges as outlined non-interactive labels (Request History + Conversations), and added real Stop/Cancel actions to Request History rows that appear only for active (`processing`/`queued`) requests.
+- **Key Findings**: The green "stop" pill users mistook for a button was `renderFinishReasonBadge('stop')`, sharing `#0a7` with `.admin-btn`. The Request History table had no real stop control at all. Background-conversation streaming scrolled the open thread because WS events trigger `debouncedLoadSessions`, which re-renders and re-scrolls the open thread when it isn't itself streaming.
+- **Related Files**: `src/proxy_endpoints.py`, `static/dashboard/index.html`, `static/dashboard/app.js`, `static/dashboard/app.css`, `tests/test_admin_dashboard.py`, `docs/changelog/v4.13_DASHBOARD_CONV_FILTERS_SCROLL_STOP.md`, `docs/TODO.md`
+
+---
+
 ## 2026-07-02
 
 ### v4.12 Embedding usage logging
