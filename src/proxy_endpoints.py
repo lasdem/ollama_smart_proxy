@@ -10,7 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import func, case, or_, literal
+from sqlalchemy import func, case, or_, and_, literal
 from sqlalchemy.orm import aliased
 
 from database import get_db, RequestLog
@@ -455,9 +455,10 @@ async def conversation_sessions(
     ip_address: Optional[str] = None,
 ):
     """
-    Paginated list of conversations (grouped by session_id), newest activity first.
-    Excludes sessions where every prompt is empty, '', or 'N/A' (warmup), matching the dashboard.
-    Admin only.
+    Paginated list of conversations, newest activity first. Grouped by conversation_key
+    (client conversation-id header or head-key), falling back to the legacy session_id for
+    older rows. Excludes conversations where every prompt is empty, '', or 'N/A' (warmup).
+    Admin only. Response is lightweight (no request bodies).
 
     Query Parameters:
     - model: Filter by model name (prefix match; use * as wildcard). Mirrors query_db.
@@ -473,7 +474,12 @@ async def conversation_sessions(
     db_sess = db.get_session()
     try:
         first_row = aliased(RequestLog)
-        session_key = func.coalesce(func.nullif(func.trim(RequestLog.session_id), ""), literal("no-session"))
+        # New rows group by conversation_key; legacy rows fall back to session_id, then a shared bucket.
+        conv_key = func.coalesce(
+            func.nullif(func.trim(RequestLog.conversation_key), ""),
+            func.nullif(func.trim(RequestLog.session_id), ""),
+            literal("no-session"),
+        )
         non_empty = case(
             (
                 or_(
@@ -486,10 +492,11 @@ async def conversation_sessions(
             else_=1,
         )
         base = db_sess.query(
-            session_key.label("session_key"),
+            conv_key.label("conv_key"),
             func.count().label("turn_count"),
             func.max(RequestLog.timestamp_received).label("last_ts"),
             func.max(case((RequestLog.status.in_(["queued", "processing"]), 1), else_=0)).label("has_live"),
+            func.max(func.coalesce(RequestLog.message_count, 0)).label("msg_count"),
             func.min(RequestLog.id).label("first_id"),
         )
         # Filter matching rows before grouping (mirrors query_db semantics).
@@ -503,7 +510,7 @@ async def conversation_sessions(
                 base = base.filter(RequestLog.source_ip == ip_address)
         grouped = (
             base
-            .group_by(session_key)
+            .group_by(conv_key)
             .having(func.sum(non_empty) > 0)
             .subquery()
         )
@@ -511,12 +518,14 @@ async def conversation_sessions(
 
         rows = (
             db_sess.query(
-                grouped.c.session_key,
+                grouped.c.conv_key,
                 grouped.c.turn_count,
                 grouped.c.last_ts,
                 grouped.c.has_live,
+                grouped.c.msg_count,
                 first_row.prompt_text,
                 first_row.model_name,
+                first_row.conversation_id,
             )
             .select_from(grouped)
             .join(first_row, first_row.id == grouped.c.first_id)
@@ -528,12 +537,14 @@ async def conversation_sessions(
 
         sessions_out = []
         for row in rows:
-            sk_val = row.session_key
+            ck_val = row.conv_key
             sessions_out.append(
                 {
-                    "session_id": None if sk_val == "no-session" else sk_val,
+                    "conversation_key": ck_val,
+                    "conversation_id": row.conversation_id,
                     "last_timestamp_received": row.last_ts.isoformat() if row.last_ts else None,
                     "turn_count": int(row.turn_count or 0),
+                    "message_count": int(row.msg_count or 0),
                     "model": row.model_name or "",
                     "preview_prompt": (row.prompt_text or "")[:500],
                     "has_live": bool(row.has_live),
@@ -556,213 +567,132 @@ async def conversation_sessions(
         db_sess.close()
 
 
-def _diag_normalized_messages(body_json: Optional[str]):
-    """Parse a stored request_body and return the normalized message list, or None if unparseable.
-    Uses the same normalization helpers as live fingerprinting so recomputed values match production."""
+def _parse_body_messages(body_json: Optional[str]):
+    """Parse a stored request_body JSON string and return its messages list, or None if unavailable
+    (empty, truncated by an explicit cap, or invalid JSON)."""
     if not body_json:
         return None
     try:
         body = json.loads(body_json)
     except Exception:
-        return None  # truncated (256KB) or invalid JSON — divergence detail unavailable
-    from smart_proxy import _normalize_for_fingerprint, _normalize_tool_calls_for_fingerprint, _extract_text_from_content
-    msgs = body.get("messages")
-    if not isinstance(msgs, list):
         return None
+    msgs = body.get("messages")
+    return msgs if isinstance(msgs, list) else None
+
+
+def _row_message_count(row) -> int:
+    """Effective message count for canonical/segment selection: stored message_count, else parsed."""
+    mc = getattr(row, "message_count", None)
+    if mc:
+        try:
+            return int(mc)
+        except (TypeError, ValueError):
+            pass
+    msgs = _parse_body_messages(getattr(row, "request_body", None))
+    return len(msgs) if isinstance(msgs, list) else 0
+
+
+def select_conversation_segments(rows):
+    """Given a conversation's requests ordered by time ascending, split into segments at compaction
+    boundaries (a drop in message count) and pick each segment's canonical (most-complete) request.
+
+    This dedupes the growing-prefix requests down to one canonical per segment. Returns a list of
+    dicts: {"canonical": <row>, "rows": [<row>, ...]}.
+    """
+    segments = []
+    current = []
+    prev_mc = None
+    for row in rows:
+        mc = _row_message_count(row)
+        if prev_mc is not None and mc < prev_mc and current:
+            segments.append(current)
+            current = []
+        current.append(row)
+        prev_mc = mc
+    if current:
+        segments.append(current)
+
     out = []
-    for m in msgs:
-        if not isinstance(m, dict):
-            continue
-        entry = {"role": m.get("role", ""), "content": _normalize_for_fingerprint(_extract_text_from_content(m.get("content", "")))}
-        if m.get("tool_calls"):
-            entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
-        if m.get("tool_call_id"):
-            entry["tool_call_id"] = m["tool_call_id"]
-        out.append(entry)
+    for seg in segments:
+        canonical = max(seg, key=lambda r: (_row_message_count(r), getattr(r, "id", 0) or 0))
+        out.append({"canonical": canonical, "rows": seg})
     return out
 
 
-def _diag_outgoing_state(log):
-    """Reconstruct the normalized [messages + assistant response] list for a completed request,
-    matching how on_stream_done builds the outgoing fingerprint. Returns None if body unparseable."""
-    from smart_proxy import _normalize_for_fingerprint, _normalize_tool_calls_for_fingerprint
-    msgs = _diag_normalized_messages(log.request_body)
-    if msgs is None:
-        return None
-    asst = {"role": "assistant", "content": _normalize_for_fingerprint(log.response_text or "")}
-    if log.tool_calls_json:
-        try:
-            asst["tool_calls"] = _normalize_tool_calls_for_fingerprint(json.loads(log.tool_calls_json))
-        except Exception:
-            pass
-    return msgs + [asst]
-
-
-def _diag_first_divergence(prev_state, cur_prefix):
-    """Find the first index where a candidate parent's outgoing state and this request's prefix differ.
-    Returns a dict describing the divergence, or None when either side is unavailable."""
-    if prev_state is None or cur_prefix is None:
-        return {"available": False, "reason": "request_body unavailable or truncated"}
-
-    def snippet(entry):
-        if not isinstance(entry, dict):
-            return None
-        c = entry.get("content", "")
-        return {"role": entry.get("role", ""), "content": (c[:160] + "…") if len(c) > 160 else c,
-                "has_tool_calls": bool(entry.get("tool_calls"))}
-
-    n = min(len(prev_state), len(cur_prefix))
-    for i in range(n):
-        if prev_state[i] != cur_prefix[i]:
-            return {"available": True, "index": i, "prev_message_count": len(prev_state),
-                    "prefix_message_count": len(cur_prefix), "expected": snippet(prev_state[i]),
-                    "actual": snippet(cur_prefix[i])}
-    if len(prev_state) != len(cur_prefix):
-        idx = n
-        return {"available": True, "index": idx, "prev_message_count": len(prev_state),
-                "prefix_message_count": len(cur_prefix),
-                "expected": snippet(prev_state[idx]) if idx < len(prev_state) else None,
-                "actual": snippet(cur_prefix[idx]) if idx < len(cur_prefix) else None,
-                "note": "length mismatch (messages inserted or trimmed)"}
-    return {"available": True, "index": None, "note": "prefixes match up to common length"}
-
-
-@router.get("/conversation_diagnostics")
-async def conversation_diagnostics(
-    request: Request,
-    limit: int = 500,
-    ip_address: Optional[str] = None,
-    model: Optional[str] = None,
-    from_time: Optional[str] = None,
-    to_time: Optional[str] = None,
-    session_id: Optional[str] = None,
-):
+@router.get("/conversation_thread")
+async def conversation_thread(request: Request, conversation_key: str):
     """
-    Chain diagnostics: for a filtered set of requests (ordered by time), report the per-request
-    session-chaining signals and classify each conversation break as `proxy_miss` (a matching prior
-    fingerprint existed but wasn't linked) or `client_divergence` (the client sent a prefix that
-    matches no prior completed response), including the first divergent message. Admin only.
+    Return a single conversation rendered from the most-complete (canonical) request's full messages[].
 
-    Filters mirror query_db: ip_address (exact or * wildcard), model (prefix or * wildcard),
-    from_time / to_time (ISO), session_id.
+    Requests sharing this conversation_key are ordered by time and split into segments at compaction
+    boundaries (a message-count drop); each segment contributes its canonical request's full messages
+    plus that request's final assistant turn. Only canonical bodies are returned (transfer stays small).
+    The in-flight request, if any, is the newest/longest and its assistant turn streams live via the WS.
+    Admin only.
     """
     _verify_admin_access_func(request, _admin_key, _static_admin_ips, _authorized_ips)
-    if limit < 1 or limit > 2000:
-        raise HTTPException(status_code=400, detail="limit must be between 1 and 2000")
+    if not conversation_key or not conversation_key.strip():
+        raise HTTPException(status_code=400, detail="conversation_key is required")
 
     db = get_db()
     sess = db.get_session()
     try:
+        ck_blank = or_(RequestLog.conversation_key.is_(None), func.trim(RequestLog.conversation_key) == "")
+        sid_blank = or_(RequestLog.session_id.is_(None), func.trim(RequestLog.session_id) == "")
         query = sess.query(RequestLog)
-        if model:
-            pattern = model.replace("*", "%") if "*" in model else f"{model}%"
-            query = query.filter(RequestLog.model_name.like(pattern))
-        if ip_address:
-            if "*" in ip_address:
-                query = query.filter(RequestLog.source_ip.like(ip_address.replace("*", "%")))
-            else:
-                query = query.filter(RequestLog.source_ip == ip_address)
-        if session_id:
-            query = query.filter(RequestLog.session_id == session_id)
-        if from_time:
-            try:
-                query = query.filter(RequestLog.timestamp_received >= datetime.fromisoformat(from_time.replace('Z', '+00:00')))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="from_time must be in ISO format")
-        if to_time:
-            try:
-                query = query.filter(RequestLog.timestamp_received <= datetime.fromisoformat(to_time.replace('Z', '+00:00')))
-            except ValueError:
-                raise HTTPException(status_code=400, detail="to_time must be in ISO format")
+        if conversation_key.strip() == "no-session":
+            query = query.filter(and_(ck_blank, sid_blank))
+        else:
+            query = query.filter(
+                or_(
+                    RequestLog.conversation_key == conversation_key,
+                    and_(ck_blank, RequestLog.session_id == conversation_key),
+                )
+            )
+        rows = query.order_by(RequestLog.timestamp_received.asc(), RequestLog.id.asc()).all()
 
-        rows = query.order_by(RequestLog.timestamp_received.asc()).limit(limit).all()
+        if not rows:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
-        requests_out = []
-        breaks_out = []
-        # For divergence, remember the most recent prior request per IP (its reconstructed outgoing state).
-        prev_by_ip = {}
-        # Reverse index for the proxy_miss crux: outgoing_fp -> earliest request_id that produced it (per IP).
-        outgoing_index = {}
+        segments = select_conversation_segments(rows)
+        segments_out = []
+        for seg in segments:
+            c = seg["canonical"]
+            msgs = _parse_body_messages(c.request_body)
+            segments_out.append(
+                {
+                    "canonical_request_id": c.request_id,
+                    "canonical_status": c.status,
+                    "message_count": _row_message_count(c),
+                    "messages": msgs,
+                    "truncated": msgs is None and bool(c.request_body),
+                    "final_response_text": c.response_text,
+                    "final_thinking_text": c.thinking_text,
+                    "final_tool_calls_json": c.tool_calls_json,
+                    "final_finish_reason": c.finish_reason,
+                    "final_timestamp_completed": c.timestamp_completed.isoformat() if c.timestamp_completed else None,
+                }
+            )
 
-        def short(fp):
-            return fp[:12] if fp else None
-
-        for log in rows:
-            msgs = None
-            try:
-                if log.request_body:
-                    parsed = json.loads(log.request_body)
-                    if isinstance(parsed.get("messages"), list):
-                        msgs = parsed["messages"]
-            except Exception:
-                msgs = None
-            message_count = len(msgs) if isinstance(msgs, list) else None
-
-            row = {
-                "request_id": log.request_id,
-                "timestamp_received": log.timestamp_received.isoformat() if log.timestamp_received else None,
-                "model": log.model_name,
-                "endpoint": log.endpoint,
-                "status": log.status,
-                "finish_reason": log.finish_reason,
-                "session_id": log.session_id,
-                "ip_address": log.source_ip,
-                "message_count": message_count,
-                "prefix_message_count": log.prefix_message_count,
-                "incoming_fp": short(log.incoming_conversation_fingerprint),
-                "outgoing_fp": short(log.outgoing_conversation_fingerprint),
-                "session_matched_request_id": log.session_matched_request_id,
-            }
-
-            # A break: this request had a prefix (a continuation attempt) but did not chain.
-            is_continuation = bool(log.incoming_conversation_fingerprint)
-            if is_continuation and not log.session_matched_request_id:
-                # Crux: did a prior request from this IP produce a matching outgoing fingerprint?
-                matched_prior = outgoing_index.get((log.source_ip, log.incoming_conversation_fingerprint))
-                if matched_prior:
-                    classification = "proxy_miss"
-                    divergence = None
-                else:
-                    classification = "client_divergence"
-                    parent = prev_by_ip.get(log.source_ip)
-                    prev_state = _diag_outgoing_state(parent) if parent is not None else None
-                    cur_prefix = _diag_normalized_messages(log.request_body)
-                    cur_prefix = cur_prefix[:-1] if isinstance(cur_prefix, list) and cur_prefix else cur_prefix
-                    divergence = _diag_first_divergence(prev_state, cur_prefix)
-                    divergence = divergence or {"available": False}
-                    if parent is not None:
-                        divergence["compared_to_request_id"] = parent.request_id
-                row["break"] = classification
-                breaks_out.append({
-                    "request_id": log.request_id,
-                    "timestamp_received": row["timestamp_received"],
-                    "classification": classification,
-                    "matched_prior_request_id": matched_prior,
-                    "divergence": divergence,
-                })
-
-            requests_out.append(row)
-
-            # Update indexes AFTER processing this row so a request never matches itself.
-            if log.outgoing_conversation_fingerprint:
-                key = (log.source_ip, log.outgoing_conversation_fingerprint)
-                if key not in outgoing_index:
-                    outgoing_index[key] = log.request_id
-            prev_by_ip[log.source_ip] = log
-
+        last = rows[-1]
+        live_ids = [r.request_id for r in rows if r.status in ("queued", "processing")]
+        conversation_id = next((r.conversation_id for r in reversed(rows) if r.conversation_id), None)
         return {
-            "count": len(requests_out),
-            "break_count": len(breaks_out),
-            "proxy_miss_count": sum(1 for b in breaks_out if b["classification"] == "proxy_miss"),
-            "client_divergence_count": sum(1 for b in breaks_out if b["classification"] == "client_divergence"),
-            "requests": requests_out,
-            "breaks": breaks_out,
+            "conversation_key": conversation_key,
+            "conversation_id": conversation_id,
+            "model": last.model_name,
+            "ip_address": last.source_ip,
+            "turn_count": len(rows),
+            "message_count": max((_row_message_count(r) for r in rows), default=0),
+            "has_live": bool(live_ids),
+            "live_request_ids": live_ids,
+            "segments": segments_out,
         }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed conversation diagnostics: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed conversation diagnostics: {e}")
+        logger.error("Failed to load conversation thread: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to load conversation thread: {e}")
     finally:
         sess.close()
 
@@ -985,7 +915,21 @@ async def proxy_live(websocket: WebSocket):
     await broadcaster.register(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            # Client controls which conversation's content it streams (subscribe-on-open).
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "subscribe":
+                ck = msg.get("conversation_key")
+                if ck:
+                    await broadcaster.subscribe(websocket, ck)
+            elif mtype == "unsubscribe":
+                await broadcaster.unsubscribe(websocket)
     except WebSocketDisconnect:
         pass
     except Exception:

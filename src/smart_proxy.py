@@ -70,6 +70,64 @@ def _normalize_tool_calls_for_fingerprint(tool_calls) -> list:
     return normalized
 
 
+# Headers clients may use to carry a stable conversation/session id (checked in order).
+# See LibreChat (X-Conversation-Id), Open WebUI (X-OpenWebUI-Chat-Id), Manifest (x-session-key), etc.
+_DEFAULT_CONVERSATION_ID_HEADERS = [
+    "x-conversation-id",
+    "x-openwebui-chat-id",
+    "x-session-key",
+    "x-session-id",
+    "x-thread-id",
+    "x-chat-id",
+    "conversation-id",
+]
+
+
+def _get_conversation_id_headers() -> List[str]:
+    """Prioritized list of header names to probe for a client conversation id.
+    Overridable via CONVERSATION_ID_HEADERS (comma-separated); read at call time so .env is respected."""
+    raw = os.getenv("CONVERSATION_ID_HEADERS", "")
+    if raw and raw.strip():
+        return [h.strip().lower() for h in raw.split(",") if h.strip()]
+    return list(_DEFAULT_CONVERSATION_ID_HEADERS)
+
+
+def _detect_conversation_id(headers) -> Optional[str]:
+    """Return the first non-empty conversation-id header value (case-insensitive), or None."""
+    for name in _get_conversation_id_headers():
+        try:
+            val = headers.get(name)
+        except Exception:
+            val = None
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def _first_user_message_text(messages) -> str:
+    """Text of the first role==user message (the stable 'task' that survives tool-result reformatting)."""
+    if isinstance(messages, list):
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "user":
+                return _extract_text_from_content(m.get("content", ""))
+    return ""
+
+
+def compute_conversation_key(client_ip: str, model_name: str, system_message: Optional[str], messages, conversation_id: Optional[str]) -> str:
+    """Stable grouping key for the Conversations view.
+
+    - If the client provided a conversation id header: ``cid:{ip}:{id}`` (most reliable, survives summarization).
+    - Else head-key: ``hk:{ip}:{model}:{sha16(system + first user message)}`` — keyed on the stable start of the
+      conversation, so mid-thread tool-result reformatting does not fragment it. A summarization that rewrites the
+      head yields a new key (accepted).
+    """
+    if conversation_id:
+        return f"cid:{client_ip}:{conversation_id}"
+    head = _normalize_for_fingerprint(system_message or "") + "\x00" + _normalize_for_fingerprint(_first_user_message_text(messages))
+    digest = hashlib.sha256(head.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"hk:{client_ip}:{model_name}:{digest}"
+
+
 def _extract_text_from_content(content) -> str:
     """Extract displayable text from a message content field.
     Handles both plain strings and OpenAI multimodal content arrays."""
@@ -108,6 +166,8 @@ VRAM_POLL_INTERVAL = int(os.getenv("VRAM_POLL_INTERVAL", "5"))
 ACTIVE_REQUEST_MAX_DURATION = int(os.getenv("ACTIVE_REQUEST_MAX_DURATION", "600"))  # 10 min
 QUEUE_ENTRY_MAX_AGE = int(os.getenv("QUEUE_ENTRY_MAX_AGE", str(REQUEST_TIMEOUT + 60)))  # REQUEST_TIMEOUT + 60s
 STREAM_CHUNK_TIMEOUT = int(os.getenv("STREAM_CHUNK_TIMEOUT", "300"))  # 5 min between chunks
+# Max bytes of the request body persisted for raw view + conversation rendering. 0 = no limit (store full body).
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", "0"))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "0"))  # 0 = keep all
 ANALYTICS_HOURLY_RETENTION_DAYS = int(os.getenv("ANALYTICS_HOURLY_RETENTION_DAYS", "8"))
 ANALYTICS_DAILY_RETENTION_DAYS = int(os.getenv("ANALYTICS_DAILY_RETENTION_DAYS", "91"))
@@ -159,6 +219,7 @@ class QueuedRequest:
     path: str  # Store the endpoint path
     future: asyncio.Future
     session_id: Optional[str] = None  # Set in enqueue_request for live UI
+    conversation_key: Optional[str] = None  # Stable grouping key for the Conversations view
     # Set while upstream Ollama stream is active (for admin stop / abort)
     upstream_response: Optional[httpx.Response] = None
     upstream_client: Optional[httpx.AsyncClient] = None
@@ -397,61 +458,30 @@ async def enqueue_request(request: Request, path: str):
             tools_available = json.dumps(tool_names)
 
     priority_score = tracker.calculate_priority(queued_req)
-    # Content-based session: same session when request's message prefix matches a previous request's messages+response
-    # Default: unique per request so concurrent single-turn requests don't collapse into one session
+    # Unique per-request id (legacy grouping fallback + live correlation).
     session_id = f"{client_ip}_{model_name}_{req_id}"
-    # Chain diagnostics: persist what this request looked for and whether it matched.
-    incoming_fp = None
-    session_matched_request_id = None
-    prefix_message_count = None
+
+    # Conversation identity for the Conversations view: prefer a client-provided conversation-id header,
+    # else a head-key derived from the system prompt + first user message (stable across tool-result reformatting).
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    message_count = len(messages) if messages else None
+    conversation_id = _detect_conversation_id(request.headers)
     try:
-        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-        if len(messages) > 1:
-            prefix = []
-            for m in messages[:-1]:
-                if not isinstance(m, dict):
-                    continue
-                entry = {"role": m.get("role", ""), "content": _normalize_for_fingerprint(_extract_text_from_content(m.get("content", "")))}
-                if m.get("tool_calls"):
-                    entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
-                if m.get("tool_call_id"):
-                    entry["tool_call_id"] = m["tool_call_id"]
-                prefix.append(entry)
-            if prefix:
-                prefix_message_count = len(prefix)
-                incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
-                existing = await asyncio.to_thread(
-                    request_repo.get_request_by_ip_and_outgoing_fingerprint,
-                    client_ip,
-                    incoming_fp,
-                )
-                if existing and existing.session_id:
-                    session_id = existing.session_id
-                    session_matched_request_id = existing.request_id
+        conversation_key = compute_conversation_key(client_ip, model_name, system_message, messages, conversation_id)
     except Exception as e:
-        logger.debug("Session reuse check failed: %s", e)
+        logger.debug("conversation_key computation failed: %s", e)
+        conversation_key = None
 
     queued_req.session_id = session_id
-    # Diagnostic trace of the session-chaining decision (correlate live splits during test runs).
-    logger.debug(
-        "session_chain_decision",
-        extra={
-            "request_id": req_id,
-            "incoming_fp": (incoming_fp[:12] if incoming_fp else None),
-            "matched": bool(session_matched_request_id),
-            "matched_request_id": session_matched_request_id,
-            "prefix_message_count": prefix_message_count,
-            "session_id": session_id,
-        },
-    )
+    queued_req.conversation_key = conversation_key
 
-    # Full request body for raw JSON view (truncate to ~256KB)
+    # Full request body for raw JSON view + conversation rendering. Untruncated by default (MAX_REQUEST_BODY_BYTES=0).
     request_body_str = None
     if raw_body:
         try:
             request_body_str = raw_body.decode("utf-8", errors="replace")
-            if len(request_body_str) > 262144:
-                request_body_str = request_body_str[:262144]
+            if MAX_REQUEST_BODY_BYTES > 0 and len(request_body_str) > MAX_REQUEST_BODY_BYTES:
+                request_body_str = request_body_str[:MAX_REQUEST_BODY_BYTES]
         except Exception:
             pass
 
@@ -464,9 +494,9 @@ async def enqueue_request(request: Request, path: str):
         request_body=request_body_str,
         system_message=system_message,
         tools_available=tools_available,
-        incoming_conversation_fingerprint=incoming_fp,
-        session_matched_request_id=session_matched_request_id,
-        prefix_message_count=prefix_message_count,
+        conversation_id=conversation_id,
+        conversation_key=conversation_key,
+        message_count=message_count,
     )
     
     async with queue_lock:
@@ -670,6 +700,7 @@ async def process_request(request: QueuedRequest, priority_score: int):
                     "path": request.path,
                     "prompt_preview": prompt_preview,
                     "session_id": request.session_id or "",
+                    "conversation_key": request.conversation_key or "",
                 },
             )
 
@@ -731,25 +762,6 @@ async def process_request(request: QueuedRequest, priority_score: int):
                                 response_text_val = f"[Tool calls: {', '.join(names)}]"
                             except Exception:
                                 response_text_val = "[Tool calls]"
-                        outgoing_fp = None
-                        if status == "completed" and request.body.get("messages") and (full_content is not None or tc_json):
-                            msgs = request.body.get("messages") or []
-                            if isinstance(msgs, list):
-                                out_state = []
-                                for m in msgs:
-                                    if not isinstance(m, dict):
-                                        continue
-                                    entry = {"role": (m.get("role") or ""), "content": _normalize_for_fingerprint(_extract_text_from_content(m.get("content") or ""))}
-                                    if m.get("tool_calls"):
-                                        entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(m["tool_calls"])
-                                    if m.get("tool_call_id"):
-                                        entry["tool_call_id"] = m["tool_call_id"]
-                                    out_state.append(entry)
-                                asst_entry = {"role": "assistant", "content": _normalize_for_fingerprint(full_content or "")}
-                                if tc_json:
-                                    asst_entry["tool_calls"] = _normalize_tool_calls_for_fingerprint(json.loads(tc_json))
-                                out_state.append(asst_entry)
-                                outgoing_fp = hashlib.sha256(json.dumps(out_state, sort_keys=True).encode()).hexdigest()
                         await asyncio.to_thread(
                             request_repo.log_request,
                             request.request_id,
@@ -760,7 +772,6 @@ async def process_request(request: QueuedRequest, priority_score: int):
                             priority_score,
                             response_text=response_text_val,
                             processing_time_seconds=processing_time,
-                            outgoing_conversation_fingerprint=outgoing_fp,
                             endpoint=request.path,
                             user_agent=request.raw_request.headers.get("user-agent"),
                             thinking_text=full_thinking or None,

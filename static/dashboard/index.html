@@ -8,7 +8,7 @@
   <base href="/proxy/dashboard/">
   <title>Proxy Monitor — Ollama Smart Proxy</title>
   <!-- Bump ?v= when changing CSS so phones pick up updates even if cache misbehaves -->
-  <link rel="stylesheet" href="app.css?v=11">
+  <link rel="stylesheet" href="app.css?v=12">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -112,7 +112,6 @@
         <label>Model <input type="text" id="convFilterModel" placeholder="partial match" /></label>
         <label>IP <input type="text" id="convFilterIp" placeholder="exact or 10.200.* for partial" /></label>
         <label>Limit <input type="number" id="convLimit" value="100" min="1" max="500" /></label>
-        <button id="loadConvDiagnostics" type="button" title="Analyze why conversations split into separate sessions">Chain diagnostics</button>
         <div id="convPager" class="dash-pager dash-pager--inline hidden">
           <span id="convPagerMeta" class="dash-pager-meta"></span>
           <div class="dash-pager-actions">
@@ -121,14 +120,6 @@
           </div>
         </div>
         <span id="convWsIndicator" class="conv-ws-indicator"></span>
-      </div>
-      <div id="convDiagnostics" class="conv-diagnostics hidden">
-        <div class="conv-diag-header">
-          <strong>Chain diagnostics</strong>
-          <span id="convDiagSummary" class="conv-diag-summary"></span>
-          <button id="closeConvDiagnostics" type="button" class="back-btn">Close</button>
-        </div>
-        <div id="convDiagBody" class="conv-diag-body"></div>
       </div>
       <div id="sessionList" class="session-list"></div>
       <div id="sessionThread" class="session-thread hidden">
@@ -255,6 +246,6 @@
       <pre id="detailRaw" class="detail-body hidden"></pre>
     </div>
   </div>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>

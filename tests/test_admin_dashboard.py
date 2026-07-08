@@ -226,8 +226,9 @@ class TestMonitoringEndpoints:
         assert data["limit"] == 5
         assert data["offset"] == 0
         for s in data["sessions"]:
-            assert "session_id" in s
+            assert "conversation_key" in s
             assert "turn_count" in s
+            assert "message_count" in s
             assert "has_live" in s
             assert "preview_prompt" in s
             assert "model" in s
@@ -249,77 +250,101 @@ class TestMonitoringEndpoints:
         assert data["total_count"] == 0
         assert data["sessions"] == []
 
-    def test_conversation_diagnostics_classifies_breaks(self):
-        """conversation_diagnostics returns per-request signals and classifies chain breaks."""
+    def test_conversation_thread_renders_canonical_and_segments(self):
+        """conversation_thread groups by conversation_key, dedupes growing prefixes to one canonical
+        per segment, and splits into a new segment on a message-count drop (compaction)."""
         import json as _json
         from data_access import init_repositories, get_request_log_repo
         init_repositories()
         repo = get_request_log_repo()
-        ip = "203.0.113.88"  # isolated test IP
+        ip = "203.0.113.90"  # isolated test IP
+        ck = "cid:203.0.113.90:thread-test"
 
         def body(msgs):
             return _json.dumps({"messages": msgs})
 
-        # Turn 1 (no prefix) -> produces outgoing fingerprint FP1.
+        base = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "first question"},
+        ]
+        # Growing-prefix turns of the same conversation (2, 4, 6 messages).
         repo.log_request(
-            "diag-A", ip, "gpt-4", "completed", 1.0, 5,
-            prompt_text="hello", response_text="hi there", session_id="S1",
-            request_body=body([{"role": "user", "content": "hello"}]),
-            outgoing_conversation_fingerprint="FP1",
+            "thr-1", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="first question", response_text="answer 1",
+            session_id="s1", conversation_key=ck, message_count=2,
+            request_body=body(base),
         )
-        # Chained continuation: matched to A -> NOT a break.
         repo.log_request(
-            "diag-B", ip, "gpt-4", "completed", 1.0, 5,
-            prompt_text="next", response_text="ok", session_id="S1",
-            request_body=body([
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"},
-                {"role": "user", "content": "next"},
+            "thr-2", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="second", response_text="answer 2",
+            session_id="s2", conversation_key=ck, message_count=4,
+            request_body=body(base + [
+                {"role": "assistant", "content": "answer 1"},
+                {"role": "user", "content": "second"},
             ]),
-            incoming_conversation_fingerprint="FP1",
-            session_matched_request_id="diag-A",
-            prefix_message_count=2,
-            outgoing_conversation_fingerprint="FP2",
         )
-        # Continuation whose prefix matches no prior outgoing fp -> client_divergence.
         repo.log_request(
-            "diag-C", ip, "gpt-4", "queued", 0, 5,
-            prompt_text="more", session_id="10.x_gpt-4_diag-C",
-            request_body=body([
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "COMPLETELY DIFFERENT"},
-                {"role": "user", "content": "more"},
+            "thr-3", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="third", response_text="answer 3",
+            session_id="s3", conversation_key=ck, message_count=6,
+            request_body=body(base + [
+                {"role": "assistant", "content": "answer 1"},
+                {"role": "user", "content": "second"},
+                {"role": "assistant", "content": "answer 2"},
+                {"role": "user", "content": "third"},
             ]),
-            incoming_conversation_fingerprint="FPX",
-            prefix_message_count=2,
         )
-        # Continuation whose prefix DOES match a prior outgoing fp but wasn't linked -> proxy_miss.
+        # Compaction: message count drops -> new segment.
         repo.log_request(
-            "diag-D", ip, "gpt-4", "queued", 0, 5,
-            prompt_text="again", session_id="10.x_gpt-4_diag-D",
+            "thr-4", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="after summary", response_text="answer 4",
+            session_id="s4", conversation_key=ck, message_count=2,
             request_body=body([
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"},
-                {"role": "user", "content": "again"},
+                {"role": "system", "content": "Summary of earlier conversation."},
+                {"role": "user", "content": "after summary"},
             ]),
-            incoming_conversation_fingerprint="FP1",
-            prefix_message_count=2,
         )
 
         headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
         resp = requests.get(
-            f"{TestConfig.PROXY_URL}/proxy/conversation_diagnostics",
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
             headers=headers,
-            params={"ip_address": ip, "limit": 100},
+            params={"conversation_key": ck},
             timeout=TestConfig.TIMEOUT,
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()
-        assert {"count", "break_count", "requests", "breaks"} <= set(data.keys())
-        classes = {b["request_id"]: b["classification"] for b in data["breaks"]}
-        assert classes.get("diag-C") == "client_divergence"
-        assert classes.get("diag-D") == "proxy_miss"
-        assert "diag-B" not in classes  # chained request is not a break
+        assert data["conversation_key"] == ck
+        assert data["turn_count"] == 4
+        assert data["has_live"] is False
+        segments = data["segments"]
+        assert len(segments) == 2, segments
+        # Segment 1 canonical is the fullest growing-prefix request (6 messages, thr-3).
+        assert segments[0]["canonical_request_id"] == "thr-3"
+        assert segments[0]["message_count"] == 6
+        assert len(segments[0]["messages"]) == 6
+        assert segments[0]["final_response_text"] == "answer 3"
+        # Segment 2 is the post-compaction turn.
+        assert segments[1]["canonical_request_id"] == "thr-4"
+        assert segments[1]["message_count"] == 2
+
+    def test_conversation_thread_requires_key(self):
+        """conversation_thread returns 400 when conversation_key is missing/blank, 404 when unknown."""
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
+            headers=headers,
+            params={"conversation_key": "   "},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 400, resp.text
+        resp2 = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
+            headers=headers,
+            params={"conversation_key": "cid:0.0.0.0:definitely-not-a-real-conversation"},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp2.status_code == 404, resp2.text
 
     def test_query_db_offset_returns_metadata(self):
         """query_db honors offset and returns total_count for pagination UI."""

@@ -250,6 +250,38 @@ class TestRequestLogRepository:
         assert updated.prefix_message_count == 3
         assert updated.outgoing_conversation_fingerprint == "b" * 64
 
+    def test_log_request_persists_conversation_fields(self, request_repo):
+        """log_request stores conversation_id/conversation_key/message_count and preserves them on update."""
+        created = request_repo.log_request(
+            "conv-req-1", "10.0.0.9", "gpt-4", "queued", 0, 5,
+            prompt_text="hi",
+            session_id="10.0.0.9_gpt-4_conv-req-1",
+            conversation_id="chat-123",
+            conversation_key="cid:10.0.0.9:chat-123",
+            message_count=7,
+        )
+        assert created is not None
+        assert created.conversation_id == "chat-123"
+        assert created.conversation_key == "cid:10.0.0.9:chat-123"
+        assert created.message_count == 7
+
+        # Completion update omits the conversation fields; they must be preserved.
+        updated = request_repo.log_request(
+            "conv-req-1", "10.0.0.9", "gpt-4", "completed", 1.0, 5,
+            response_text="done",
+        )
+        assert updated is not None
+        assert updated.conversation_id == "chat-123"
+        assert updated.conversation_key == "cid:10.0.0.9:chat-123"
+        assert updated.message_count == 7
+
+    def test_conversation_key_column_exists(self, db_connection):
+        """The conversation grouping columns should exist in request_logs."""
+        from sqlalchemy import inspect as sa_inspect
+        inspector = sa_inspect(db_connection.engine)
+        columns = {c["name"] for c in inspector.get_columns("request_logs")}
+        assert {"conversation_id", "conversation_key", "message_count"} <= columns
+
     def test_get_request_logs_by_model(self, request_repo):
         """Test retrieving request logs by model name"""
         now = datetime.utcnow()

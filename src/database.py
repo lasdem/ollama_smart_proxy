@@ -58,16 +58,19 @@ class RequestLog(Base):
     processing_time_seconds = Column(Float)
     status = Column(String(50), nullable=False, index=True)  # e.g., 'received', 'processing', 'completed', 'failed'
     error_message = Column(Text)
-    session_id = Column(String(255), nullable=True, index=True)  # content-based conversation grouping
-    outgoing_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of messages+response for session matching
-    incoming_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of this request's message prefix (for chain diagnostics)
-    session_matched_request_id = Column(String(255), nullable=True)  # request_id this request chained from (NULL = new session)
-    prefix_message_count = Column(Integer, nullable=True)  # number of messages in the hashed prefix (surfaces context trim/inject)
+    session_id = Column(String(255), nullable=True, index=True)  # unique per-request default id (legacy grouping fallback + live correlation)
+    conversation_id = Column(String(255), nullable=True)  # raw client-provided conversation id header value (if any)
+    conversation_key = Column(String(128), nullable=True, index=True)  # stable grouping key (cid:... from header, or hk:... head-key)
+    message_count = Column(Integer, nullable=True)  # len(messages) in this request (used to pick the canonical/most-complete turn)
+    outgoing_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # DORMANT: legacy fingerprint chaining (unused)
+    incoming_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # DORMANT: legacy chain diagnostics (unused)
+    session_matched_request_id = Column(String(255), nullable=True)  # DORMANT: legacy chain diagnostics (unused)
+    prefix_message_count = Column(Integer, nullable=True)  # DORMANT: legacy chain diagnostics (unused)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     endpoint = Column(String(255), nullable=True)  # e.g. /api/chat, /v1/chat/completions
     user_agent = Column(String(512), nullable=True)  # From request header User-Agent
     thinking_text = Column(Text, nullable=True)  # Reasoning/thinking trace from thinking models
-    request_body = Column(Text, nullable=True)  # Full request body (JSON string), truncated to ~64KB
+    request_body = Column(Text, nullable=True)  # Full request body (JSON string); untruncated by default (see MAX_REQUEST_BODY_BYTES)
     system_message = Column(Text, nullable=True)  # System prompt from messages[role=system] or top-level 'system' field
     tool_calls_json = Column(Text, nullable=True)  # JSON string of tool calls from assistant response
     finish_reason = Column(String(50), nullable=True)  # e.g. "stop", "tool_calls", "length"
@@ -78,6 +81,7 @@ class RequestLog(Base):
     __table_args__ = (
         Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
         Index('ix_ip_incoming_fp', 'source_ip', 'incoming_conversation_fingerprint'),
+        Index('ix_conversation_key', 'conversation_key'),
         Index('ix_timestamp_model', 'timestamp_received', 'model_name'),
         # query_db: time range + sort by completed (dashboard "recent")
         Index('ix_tsrecv_tcomp', 'timestamp_received', 'timestamp_completed'),
@@ -282,6 +286,9 @@ class DatabaseConnection:
                     ("incoming_conversation_fingerprint", "VARCHAR(64)"),
                     ("session_matched_request_id", "VARCHAR(255)"),
                     ("prefix_message_count", "INTEGER"),
+                    ("conversation_id", "VARCHAR(255)"),
+                    ("conversation_key", "VARCHAR(128)"),
+                    ("message_count", "INTEGER"),
                 ]:
                     if col_name not in existing:
                         conn.execute(text(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_ddl}"))
@@ -309,6 +316,10 @@ class DatabaseConnection:
                     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ip_incoming_fp ON request_logs (source_ip, incoming_conversation_fingerprint)"))
                     conn.commit()
                     logger.info("Added composite index ix_ip_incoming_fp")
+                if "ix_conversation_key" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_conversation_key ON request_logs (conversation_key)"))
+                    conn.commit()
+                    logger.info("Added index ix_conversation_key")
         except Exception as e:
             logger.warning("Migration add columns failed (may already exist): %s", e)
     
@@ -466,6 +477,9 @@ class DatabaseConnection:
                             status=record.get('status'),
                             error_message=record.get('error_message'),
                             session_id=record.get('session_id'),
+                            conversation_id=record.get('conversation_id'),
+                            conversation_key=record.get('conversation_key'),
+                            message_count=record.get('message_count'),
                             outgoing_conversation_fingerprint=record.get('outgoing_conversation_fingerprint'),
                             incoming_conversation_fingerprint=record.get('incoming_conversation_fingerprint'),
                             session_matched_request_id=record.get('session_matched_request_id'),

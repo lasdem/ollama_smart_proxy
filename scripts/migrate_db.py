@@ -195,6 +195,44 @@ def migrate_to_v5():
     logger.info("Migration v5 complete")
 
 
+def migrate_to_v6():
+    """
+    Migration v6: Add conversation grouping columns for the re-engineered Conversations view
+    (conversation_id, conversation_key, message_count) + index on conversation_key.
+    The legacy fingerprint columns are left in place but dormant.
+    """
+    logger.info("Running migration v6: Add conversation grouping columns")
+    db = get_db()
+    session = db.get_session()
+    try:
+        inspector = inspect(db.engine)
+        columns = [c["name"] for c in inspector.get_columns("request_logs")]
+        for col_name, col_ddl in [
+            ("conversation_id", "VARCHAR(255)"),
+            ("conversation_key", "VARCHAR(128)"),
+            ("message_count", "INTEGER"),
+        ]:
+            if col_name not in columns:
+                session.execute(text(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_ddl}"))
+                session.commit()
+                logger.info("Added %s column to request_logs", col_name)
+            else:
+                logger.info("%s column already exists", col_name)
+        existing_indexes = {idx["name"] for idx in inspector.get_indexes("request_logs")}
+        if "ix_conversation_key" not in existing_indexes:
+            session.execute(text("CREATE INDEX IF NOT EXISTS ix_conversation_key ON request_logs (conversation_key)"))
+            session.commit()
+            logger.info("Added index ix_conversation_key")
+        record_migration(6, "Add conversation grouping columns (conversation_id, conversation_key, message_count)")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Migration v6 failed: {e}")
+        raise
+    finally:
+        session.close()
+    logger.info("Migration v6 complete")
+
+
 def _truncate_analytics_rollups(session, is_pg: bool) -> None:
     """Clear rollup tables so backfill replaces partial/live data with a full request_logs aggregate."""
     tables = (
@@ -455,6 +493,7 @@ def run_migrations(target_version: int = None):
         3: migrate_to_v3,
         4: migrate_to_v4,
         5: migrate_to_v5,
+        6: migrate_to_v6,
     }
     
     # Determine which migrations to run

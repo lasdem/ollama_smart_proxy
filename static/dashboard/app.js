@@ -100,42 +100,6 @@
     return '<details class="thread-tool-calls"><summary>Tool Calls (' + calls.length + ')</summary>' + inner + '</details>';
   }
 
-  function renderToolResultsFromBody(requestBody) {
-    if (!requestBody) return '';
-    var body;
-    try { body = JSON.parse(requestBody); } catch (_) { return ''; }
-    var msgs = body.messages;
-    if (!Array.isArray(msgs)) return '';
-    var toolMsgs = msgs.filter(function (m) { return m && m.role === 'tool'; });
-    if (toolMsgs.length === 0) return '';
-    var inner = toolMsgs.map(function (m) {
-      var callId = m.tool_call_id || '';
-      var content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
-      var preview = content.length > 500 ? content.slice(0, 500) + '…' : content;
-      return '<div class="tool-result-item"><span class="tool-call-badge tool-result-badge">' + escapeHtml(callId || 'result') + '</span>' +
-        '<pre class="tool-call-args">' + escapeHtml(preview) + '</pre></div>';
-    }).join('');
-    return '<details class="thread-tool-calls thread-tool-results"><summary>Tool Results (' + toolMsgs.length + ')</summary>' + inner + '</details>';
-  }
-
-  /** Check if this request represents a tool result turn.
-   *  Primary: parse request_body and check last message role === "tool".
-   *  Fallback: when body is truncated/unparseable, check prompt_text prefix. */
-  function lastMessageIsToolResult(requestBody, promptText) {
-    if (requestBody) {
-      try {
-        var body = JSON.parse(requestBody);
-        var msgs = body.messages;
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          var last = msgs[msgs.length - 1];
-          return last && last.role === 'tool';
-        }
-      } catch (_) { /* body truncated or unparseable — fall through */ }
-    }
-    if (typeof promptText === 'string' && promptText.indexOf('[Tool result') === 0) return true;
-    return false;
-  }
-
   function renderFinishReasonBadge(reason) {
     if (!reason) return '';
     var cls = 'finish-reason';
@@ -143,14 +107,6 @@
     else if (reason === 'tool_calls') cls += ' finish-tool-calls';
     else if (reason === 'length') cls += ' finish-length';
     return ' <span class="' + cls + '">' + escapeHtml(reason) + '</span>';
-  }
-
-  function renderTokenInfo(req) {
-    var parts = [];
-    if (req.prompt_eval_count != null) parts.push('in: ' + req.prompt_eval_count);
-    if (req.eval_count != null) parts.push('out: ' + req.eval_count);
-    if (parts.length === 0) return '';
-    return ' <span class="token-info">' + parts.join(' · ') + ' tokens</span>';
   }
 
   /* ---------- Tabs ---------- */
@@ -182,8 +138,6 @@
   var HOME_RECENT_LIMIT = 5;
   /** Narrow columns for faster /proxy/query_db (skip large TEXT blobs). */
   var FIELDS_HOME_RECENT = 'request_id,model,ip_address,status,duration_seconds,processing_time_seconds,queue_wait_seconds,timestamp_received,timestamp_completed,session_id,endpoint';
-  /** Session list + thread: omit request_body (large); keep response/thinking for display. API uses key `model`. */
-  var FIELDS_SESSION_LIST = 'request_id,model,ip_address,status,duration_seconds,prompt_text,response_text,thinking_text,timestamp_received,timestamp_started,timestamp_completed,session_id,endpoint,queue_wait_seconds,processing_time_seconds,error_message,priority_score,system_message,tool_calls_json,finish_reason,prompt_eval_count,eval_count,tools_available,request_body';
   var DEBOUNCE_MS = 150;
   /** Request History tab: offset for /proxy/query_db pagination */
   var historyPageOffset = 0;
@@ -468,6 +422,18 @@
     return proto + '//' + window.location.host + API_BASE + '/live?key=' + encodeURIComponent(key);
   }
 
+  /** Subscribe-on-open: the server only streams chunk content for the conversation we subscribe to. */
+  function subscribeWs(conversationKey) {
+    if (ws && ws.readyState === WebSocket.OPEN && conversationKey) {
+      try { ws.send(JSON.stringify({ type: 'subscribe', conversation_key: conversationKey })); } catch (_) {}
+    }
+  }
+  function unsubscribeWs() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'unsubscribe' })); } catch (_) {}
+    }
+  }
+
   function connectLiveWs() {
     var url = buildLiveWsUrl();
     if (!url) return;
@@ -480,6 +446,8 @@
       setWsStatus('live', '#0f0');
       document.getElementById('connectWs').classList.add('hidden');
       document.getElementById('disconnectWs').classList.remove('hidden');
+      // Re-subscribe to the open conversation after a reconnect so its stream resumes.
+      if (currentConvKey) subscribeWs(currentConvKey);
     };
     ws.onmessage = function (ev) {
       try {
@@ -488,22 +456,21 @@
           throttledLoadHomeFromWs();
         }
         if (msg.type === 'request_started') {
-          var sid = msg.metadata && msg.metadata.session_id;
-          if (sid && !currentSessionRequests) pendingLiveOpen = sid;
-          // Only fetch sessions list if we're not already viewing a thread for this session
-          var viewingSid = currentSessionRequests && currentSessionRequests._sid;
-          if (!viewingSid || viewingSid !== sid) {
-            if (getActiveTabId() === 'conversations' || pendingLiveOpen) {
-              debouncedLoadSessions();
-            }
+          // Lightweight list refresh only (no content) while browsing conversations.
+          if (getActiveTabId() === 'conversations') debouncedLoadSessions();
+          // A new turn in the OPEN conversation → adopt the new (fuller) canonical.
+          var ck = msg.metadata && msg.metadata.conversation_key;
+          if (ck && currentConvKey && ck === currentConvKey) {
+            debouncedRefreshOpenConversation();
           }
         } else if (msg.type === 'request_completed') {
-          // Finalize live text into completed state, then refresh
-          finalizeCompletedRequest(msg.request_id);
+          // Finalize live text into completed state for the open conversation only.
+          if (liveAccumulated[msg.request_id] || findAssistantDiv(msg.request_id)) {
+            finalizeCompletedRequest(msg.request_id);
+          }
+          if (getActiveTabId() === 'conversations') debouncedLoadSessions();
         } else if (msg.type === 'chunk') {
-          // Always apply chunk payloads to the DOM when a matching row exists (flushChunkUpdates
-          // no-ops if not in view). Do not gate on liveMode — WebSocket auto-connect does not
-          // set liveMode, so "Go live" was required before, which hid streamed text during chat.
+          // Chunks are only sent by the server for the conversation we subscribed to (the open one).
           var kind = msg.kind || 'content';
           var fullText = msg.full !== undefined ? msg.full : ((liveAccumulated[msg.request_id] || '') + (msg.delta || ''));
           var fullThinking = msg.full_thinking !== undefined ? msg.full_thinking : ((liveThinkingAccumulated[msg.request_id] || '') + (kind === 'thinking' ? (msg.delta || '') : ''));
@@ -612,7 +579,8 @@
             }
           }
         }
-        if (currentSessionRequests && currentSessionRequests.some(function (r) { return r.request_id === rid; })) needScroll = true;
+        // Chunks only arrive for the open conversation, so a matching row means we should follow it.
+        needScroll = true;
       }
     }
     pendingChunks = {};
@@ -639,24 +607,13 @@
     historyLimitEl.addEventListener('change', function () { localStorage.setItem('proxy_history_limit', this.value); });
   }
 
-  /** Check if any request in the current thread is actively streaming live chunks (content or thinking-only). */
-  function hasActiveStreaming() {
-    if (!currentSessionRequests) return false;
-    for (var i = 0; i < currentSessionRequests.length; i++) {
-      var rid = currentSessionRequests[i].request_id;
-      if (liveAccumulated[rid]) return true;
-      if (liveThinkingAccumulated[rid]) return true;
-    }
-    return false;
-  }
-
-  /** After request_completed, fetch that single request's final data and update the thread in-place. */
+  /** After request_completed for the open conversation: finalize live text in-place, then refresh
+   *  the open conversation (to adopt final metadata / next canonical) and the list badges. */
   function finalizeCompletedRequest(requestId) {
     var finalText = liveAccumulated[requestId] || '';
-    var finalThinking = liveThinkingAccumulated[requestId] || '';
     delete liveAccumulated[requestId];
     delete liveThinkingAccumulated[requestId];
-    // Update the DOM in-place: swap streaming indicator for final state
+    // Update the DOM in-place: swap streaming indicator for final state.
     var row = findAssistantDiv(requestId);
     if (row) {
       row.classList.remove('thread-msg-live');
@@ -668,43 +625,9 @@
         streamEl.innerHTML = renderMarkdown(finalText);
       }
     }
-    // Fetch the final DB record to get accurate metadata (duration, status, etc.)
-    var key = getKey();
-    if (key) {
-      fetch(API_BASE + '/requests/' + encodeURIComponent(requestId), { headers: apiHeaders() })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (req) {
-          if (!req) return;
-          // Update currentSessionRequests entry in-place
-          if (currentSessionRequests) {
-            for (var i = 0; i < currentSessionRequests.length; i++) {
-              if (currentSessionRequests[i].request_id === requestId) {
-                currentSessionRequests[i] = req;
-                break;
-              }
-            }
-          }
-          // Update the assistant row with final metadata
-          var row2 = findAssistantDiv(requestId);
-          if (row2) {
-            var roleEl = row2.querySelector('.role');
-            if (roleEl) {
-              roleEl.innerHTML = 'Assistant · ' + escapeHtml(req.model || '') + ' · ' + fmtDurationShort(req.duration_seconds);
-            }
-            // If DB has response_text and we didn't have live text, render it
-            if (req.response_text && !finalText) {
-              var bodyEl = row2.querySelector('.body');
-              if (bodyEl) {
-                bodyEl.className = 'body markdown-body';
-                bodyEl.innerHTML = renderMarkdown(req.response_text);
-              }
-            }
-          }
-        })
-        .catch(function () {});
-    }
-    // Also refresh session list (to update badges/status) — but don't rebuild the thread
-    debouncedLoadSessions();
+    // Re-fetch the open conversation so finish reason + any new canonical render correctly.
+    if (currentConvKey) debouncedRefreshOpenConversation();
+    if (getActiveTabId() === 'conversations') debouncedLoadSessions();
   }
 
   function findAssistantDiv(requestId) {
@@ -728,8 +651,8 @@
   }
 
   /* -- Sessions list -- */
-  var currentSessionRequests = null;
-  var pendingLiveOpen = null; // session_id string to auto-open after loadSessions
+  var currentConvKey = null;   // conversation_key currently open, or null (list view)
+  var currentConvData = null;  // last /conversation_thread payload for the open conversation
   /** O(1) lookup for assistant rows while a thread is open (avoids repeated querySelectorAll per chunk). */
   var assistantRowByRid = {};
 
@@ -765,23 +688,38 @@
     if (next) next.disabled = offset + count >= total;
   }
 
-  function fetchSessionThread(sid) {
+  /** Fetch a single conversation rendered from its canonical request(s). Only canonical bodies are
+   *  returned by the server, so this stays small even for very long conversations. */
+  function fetchConversationThread(conversationKey) {
     var key = getKey();
     if (!key) return Promise.reject(new Error('No key'));
-    var qid = encodeURIComponent(sid === 'no-session' ? 'no-session' : sid);
-    return fetch(API_BASE + '/query_db?session_id=' + qid + '&limit=500&sort_by=timestamp_received&sort_order=asc&fields=' + encodeURIComponent(FIELDS_SESSION_LIST), { headers: apiHeaders() })
-      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
-      .then(function (data) {
-        var reqs = (data.requests || []).slice();
-        reqs.sort(function (a, b) { return (a.timestamp_received || '').localeCompare(b.timestamp_received || ''); });
-        return reqs;
-      });
+    return fetch(API_BASE + '/conversation_thread?conversation_key=' + encodeURIComponent(conversationKey), { headers: apiHeaders() })
+      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
   }
 
-  function openSessionFromList(sid) {
-    fetchSessionThread(sid).then(function (reqs) {
-      showSessionThread(sid, reqs, true);
+  /** Open a conversation: subscribe FIRST (so no chunks are missed), then load + render its content. */
+  function openConversation(conversationKey, forceScroll) {
+    if (!conversationKey) return;
+    currentConvKey = conversationKey;
+    subscribeWs(conversationKey);
+    fetchConversationThread(conversationKey).then(function (data) {
+      if (currentConvKey !== conversationKey) return; // user switched away meanwhile
+      showSessionThread(conversationKey, data, forceScroll);
     }).catch(function (e) { alert('Failed to open conversation: ' + (e.message || e)); });
+  }
+
+  function refreshOpenConversation(forceScroll) {
+    if (!currentConvKey) return;
+    var ck = currentConvKey;
+    fetchConversationThread(ck).then(function (data) {
+      if (currentConvKey !== ck) return;
+      showSessionThread(ck, data, forceScroll);
+    }).catch(function () { /* keep existing thread on transient errors */ });
+  }
+  var refreshConvTimer = null;
+  function debouncedRefreshOpenConversation() {
+    if (refreshConvTimer) clearTimeout(refreshConvTimer);
+    refreshConvTimer = setTimeout(function () { refreshConvTimer = null; refreshOpenConversation(false); }, DEBOUNCE_MS);
   }
 
   function loadSessions() {
@@ -807,7 +745,7 @@
         var listEl = document.getElementById('sessionList');
         listEl.innerHTML = '';
         (data.sessions || []).forEach(function (sess) {
-          var sid = sess.session_id != null && sess.session_id !== '' ? sess.session_id : 'no-session';
+          var ck = sess.conversation_key;
           var time = sess.last_timestamp_received ? new Date(sess.last_timestamp_received).toLocaleString() : '';
           var preview = (sess.preview_prompt || '').slice(0, 80);
           if (sess.preview_prompt && sess.preview_prompt.length > 80) preview += '…';
@@ -816,113 +754,15 @@
           item.className = 'session-item' + (inProgress ? ' session-live' : '');
           item.innerHTML =
             '<div class="session-header"><strong>' + escapeHtml(sess.model || '') + '</strong> · ' +
-            (sess.turn_count || 0) + ' turn(s) · ' + escapeHtml(time) +
+            (sess.message_count || 0) + ' msg · ' + (sess.turn_count || 0) + ' turn(s) · ' + escapeHtml(time) +
             (inProgress ? ' <span class="live-badge">live</span>' : '') +
             '</div><div class="session-preview">' + escapeHtml(preview) + '</div>';
-          item.addEventListener('click', function () { openSessionFromList(sid); });
+          item.addEventListener('click', function () { openConversation(ck, true); });
           listEl.appendChild(item);
         });
-
-        if (currentSessionRequests && currentSessionRequests._sid && !hasActiveStreaming()) {
-          var sidOpen = currentSessionRequests._sid;
-          fetchSessionThread(sidOpen).then(function (reqs) {
-            showSessionThread(sidOpen, reqs, false);
-          }).catch(function () { /* keep existing thread on transient errors */ });
-        }
-
-        if (pendingLiveOpen) {
-          var sidLive = pendingLiveOpen;
-          pendingLiveOpen = null;
-          fetchSessionThread(sidLive).then(function (reqs) {
-            document.getElementById('sessionList').style.display = 'none';
-            document.getElementById('sessionThread').classList.remove('hidden');
-            showSessionThread(sidLive, reqs, true);
-          }).catch(function () { /* list stays visible */ });
-        }
       })
       .catch(function (e) { console.error('Load sessions failed:', e); });
   }
-  /* -- Chain diagnostics (why conversations split) -- */
-  function renderConvDiagnostics(data) {
-    var body = document.getElementById('convDiagBody');
-    var summary = document.getElementById('convDiagSummary');
-    if (!body) return;
-    if (summary) {
-      summary.textContent = data.count + ' request(s) · ' + data.break_count + ' break(s) · ' +
-        data.proxy_miss_count + ' proxy miss · ' + data.client_divergence_count + ' client divergence';
-    }
-    var breaksByRid = {};
-    (data.breaks || []).forEach(function (b) { breaksByRid[b.request_id] = b; });
-    var rows = (data.requests || []).map(function (r) {
-      var brk = breaksByRid[r.request_id];
-      var breakCell = '';
-      if (brk) {
-        var cls = brk.classification === 'proxy_miss' ? 'diag-break-proxy' : 'diag-break-client';
-        breakCell = '<span class="diag-break ' + cls + '">' + escapeHtml(brk.classification) + '</span>';
-      } else if (r.session_matched_request_id) {
-        breakCell = '<span class="diag-chained">chained</span>';
-      }
-      var detail = '';
-      if (brk && brk.classification === 'client_divergence' && brk.divergence) {
-        var d = brk.divergence;
-        if (d.available && d.index != null) {
-          var exp = d.expected ? (escapeHtml(d.expected.role) + ': ' + escapeHtml(d.expected.content || '')) : '(none)';
-          var act = d.actual ? (escapeHtml(d.actual.role) + ': ' + escapeHtml(d.actual.content || '')) : '(none)';
-          detail = '<div class="diag-divergence">First divergence at message #' + d.index +
-            (d.note ? ' (' + escapeHtml(d.note) + ')' : '') +
-            '<div class="diag-diff"><span class="diag-diff-label">expected</span><pre>' + exp + '</pre></div>' +
-            '<div class="diag-diff"><span class="diag-diff-label">actual</span><pre>' + act + '</pre></div></div>';
-        } else if (d && !d.available) {
-          detail = '<div class="diag-divergence diag-muted">' + escapeHtml(d.reason || 'divergence detail unavailable') + '</div>';
-        }
-      } else if (brk && brk.classification === 'proxy_miss') {
-        detail = '<div class="diag-divergence">Matching prior fingerprint existed (request ' +
-          escapeHtml((brk.matched_prior_request_id || '').slice(0, 12)) + '…) but was not linked.</div>';
-      }
-      var t = r.timestamp_received ? new Date(r.timestamp_received).toLocaleString() : '';
-      return '<tr class="' + (brk ? 'diag-row-break' : '') + '">' +
-        '<td><code>' + escapeHtml((r.request_id || '').slice(0, 12)) + '…</code></td>' +
-        '<td>' + escapeHtml(t) + '</td>' +
-        '<td>' + escapeHtml(r.model || '') + '</td>' +
-        '<td class="dash-num">' + (r.message_count != null ? r.message_count : '—') + '</td>' +
-        '<td class="dash-num">' + (r.prefix_message_count != null ? r.prefix_message_count : '—') + '</td>' +
-        '<td><code>' + escapeHtml(r.incoming_fp || '—') + '</code></td>' +
-        '<td><code>' + escapeHtml(r.outgoing_fp || '—') + '</code></td>' +
-        '<td>' + breakCell + detail + '</td>' +
-        '</tr>';
-    }).join('');
-    body.innerHTML = '<div class="table-wrap"><table class="dash-table diag-table"><thead><tr>' +
-      '<th>Request</th><th>Time</th><th>Model</th><th>Msgs</th><th>Prefix</th><th>In FP</th><th>Out FP</th><th>Chain</th>' +
-      '</tr></thead><tbody>' + (rows || '<tr><td colspan="8" class="dash-muted">No requests for this filter</td></tr>') + '</tbody></table></div>';
-  }
-
-  function loadConvDiagnostics() {
-    var key = getKey();
-    if (!key) { setAuthStatus(false, 'Set key first'); return; }
-    var modelEl = document.getElementById('convFilterModel');
-    var ipEl = document.getElementById('convFilterIp');
-    var model = modelEl && modelEl.value ? modelEl.value.trim() : '';
-    var ip = ipEl && ipEl.value ? ipEl.value.trim() : '';
-    var url = API_BASE + '/conversation_diagnostics?limit=500';
-    if (model) url += '&model=' + encodeURIComponent(model);
-    if (ip) url += '&ip_address=' + encodeURIComponent(ip);
-    var panel = document.getElementById('convDiagnostics');
-    var body = document.getElementById('convDiagBody');
-    if (panel) panel.classList.remove('hidden');
-    if (body) body.innerHTML = '<div class="dash-muted">Loading…</div>';
-    fetch(url, { headers: apiHeaders() })
-      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
-      .then(function (data) { renderConvDiagnostics(data); })
-      .catch(function (e) { if (body) body.innerHTML = '<div class="dash-muted">Failed: ' + escapeHtml(e.message || String(e)) + '</div>'; });
-  }
-  var loadConvDiagBtn = document.getElementById('loadConvDiagnostics');
-  if (loadConvDiagBtn) loadConvDiagBtn.addEventListener('click', loadConvDiagnostics);
-  var closeConvDiagBtn = document.getElementById('closeConvDiagnostics');
-  if (closeConvDiagBtn) closeConvDiagBtn.addEventListener('click', function () {
-    var panel = document.getElementById('convDiagnostics');
-    if (panel) panel.classList.add('hidden');
-  });
-
   document.getElementById('loadSessions').addEventListener('click', function () { convPageOffset = 0; loadSessions(); });
   ['convFilterModel', 'convFilterIp'].forEach(function (id) {
     var el = document.getElementById(id);
@@ -957,7 +797,9 @@
   document.getElementById('backToSessions').addEventListener('click', function () {
     document.getElementById('sessionThread').classList.add('hidden');
     document.getElementById('sessionList').style.display = '';
-    currentSessionRequests = null;
+    unsubscribeWs();
+    currentConvKey = null;
+    currentConvData = null;
     assistantRowByRid = {};
   });
 
@@ -983,160 +825,154 @@
     });
   }
 
-  function showSessionThread(sid, requests, forceScroll) {
-    currentSessionRequests = requests;
-    currentSessionRequests._sid = sid;
+  /** Extract displayable text from a message content field (string or OpenAI multimodal array). */
+  function messageText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content.map(function (it) {
+        if (it && typeof it === 'object') {
+          if (it.type === 'text') return it.text || '';
+          if (it.type === 'image_url' || it.type === 'image') return '[image]';
+          return '';
+        }
+        return typeof it === 'string' ? it : '';
+      }).join('');
+    }
+    return content == null ? '' : String(content);
+  }
+
+  /** Default collapse state for a transcript message role (Copilot-style: history readable,
+   *  system prompt + tool payloads tucked away). Manual gutter toggles override this. */
+  function defaultCollapsedForRole(role) {
+    return role === 'system' || role === 'tool';
+  }
+
+  /** Render one message from a canonical request's messages[] array into a thread-msg div. */
+  function renderMessageBlock(ck, segIdx, mi, m, manualOverrides) {
+    var role = (m && m.role) || '';
+    var key = segIdx + ':' + mi + ':' + role;
+    var text = messageText(m && m.content);
+    var div = document.createElement('div');
+    var roleLabel, cls, bodyHtml;
+    if (role === 'system') {
+      roleLabel = 'System'; cls = 'system';
+      bodyHtml = '<div class="body">' + escapeHtml(text) + '</div>';
+    } else if (role === 'assistant') {
+      roleLabel = 'Assistant'; cls = '';
+      var tc = (m && m.tool_calls) ? renderToolCallsHtml(JSON.stringify(m.tool_calls)) : '';
+      var asstBody = text ? renderMarkdown(text) : '';
+      bodyHtml = '<div class="body markdown-body">' + asstBody + '</div>' + tc;
+    } else if (role === 'tool') {
+      roleLabel = 'Tool Result'; cls = 'tool thread-msg-tool-turn';
+      var callId = (m && m.tool_call_id) || 'result';
+      bodyHtml = '<div class="tool-result-item"><span class="tool-call-badge tool-result-badge">' + escapeHtml(callId) +
+        '</span><pre class="tool-call-args">' + escapeHtml(text) + '</pre></div>';
+    } else {
+      roleLabel = role === 'user' ? 'User' : (role || 'Message'); cls = 'user';
+      bodyHtml = '<div class="body">' + escapeHtml(text) + '</div>';
+    }
+    var collapsed = (key in manualOverrides) ? manualOverrides[key] : defaultCollapsedForRole(role);
+    div.className = 'thread-msg ' + cls + (collapsed ? ' collapsed' : '');
+    div.innerHTML = '<div class="role">' + roleLabel + '</div>' + bodyHtml;
+    addGutterAndPreview(div, key, text || roleLabel, ck);
+    return div;
+  }
+
+  /** Render the canonical request's OWN assistant answer (the turn being generated / just completed).
+   *  This turn is not part of messages[]; it streams live for an in-flight canonical. */
+  function renderFinalAssistant(ck, segIdx, seg, model, manualOverrides) {
+    var rid = seg.canonical_request_id || '';
+    var isLive = (seg.canonical_status === 'processing' || seg.canonical_status === 'queued');
+    var isError = seg.canonical_status === 'error';
+    var key = segIdx + ':final';
+
+    var respText, responseBody;
+    if (liveAccumulated[rid]) {
+      respText = liveAccumulated[rid];
+      responseBody = escapeHtml(respText);
+    } else {
+      respText = seg.final_response_text || '';
+      responseBody = (respText && (respText.indexOf('[HTTP') === 0 || respText.indexOf('[Error]') === 0))
+        ? escapeHtml(respText) : renderMarkdown(respText);
+    }
+
+    var hasThinking = !!(seg.final_thinking_text && seg.final_thinking_text.trim());
+    var liveThinking = isLive && (liveThinkingAccumulated[rid] || '');
+    var thinkingHtml = '';
+    if (hasThinking || liveThinking) {
+      var thinkingContent = (seg.final_thinking_text && seg.final_thinking_text.trim()) || liveThinking || '';
+      var thinkingOpen = isLive && liveThinking && !(liveAccumulated[rid] || responseBody);
+      thinkingHtml = '<details class="thread-thinking' + (isLive ? ' thread-thinking-live' : '') + '"' + (thinkingOpen ? ' open' : '') +
+        '><summary>Thinking</summary><pre class="thread-thinking-body' + (isLive ? ' streamable-thinking' : '') + '">' + escapeHtml(thinkingContent) + '</pre></details>';
+    }
+
+    var toolCallsHtml = renderToolCallsHtml(seg.final_tool_calls_json);
+    var finishBadge = isLive ? '' : renderFinishReasonBadge(seg.final_finish_reason);
+    var stopCtl = '';
+    if (isLive && getKey() && rid) {
+      var act = seg.canonical_status === 'queued' ? 'cancel' : 'stop';
+      var label = act === 'cancel' ? 'Cancel' : 'Stop';
+      stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(rid) + '" data-act="' + act + '">' + label + '</button>';
+    }
+
+    var div = document.createElement('div');
+    var collapsed = (key in manualOverrides) ? manualOverrides[key] : false;
+    div.className = 'thread-msg' + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '') + (collapsed ? ' collapsed' : '');
+    if (rid) { div.setAttribute('data-request-id', rid); assistantRowByRid[rid] = div; }
+    div.innerHTML =
+      '<div class="role">Assistant · ' + escapeHtml(model || '') +
+      (isLive ? ' · <span class="streaming-indicator">streaming…</span>' : '') +
+      finishBadge + stopCtl + '</div>' +
+      thinkingHtml +
+      '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>' +
+      toolCallsHtml;
+    addGutterAndPreview(div, key, respText, ck);
+    return div;
+  }
+
+  /**
+   * Render a whole logical conversation from /conversation_thread as one instance: each segment's
+   * canonical request contributes its full messages[] (the real system/user/assistant/tool thread)
+   * plus that request's final assistant turn. Segments (context compaction) get a divider.
+   */
+  function showSessionThread(ck, data, forceScroll) {
+    currentConvKey = ck;
+    currentConvData = data;
     assistantRowByRid = {};
     document.getElementById('sessionList').style.display = 'none';
     document.getElementById('sessionThread').classList.remove('hidden');
-    var titleModel = requests.length ? (requests[0].model || '') : '';
-    document.getElementById('sessionTitle').textContent = titleModel + ' — ' + requests.length + ' turn(s)';
+
+    var segments = (data && data.segments) || [];
+    var model = (data && data.model) || '';
+    document.getElementById('sessionTitle').textContent =
+      model + ' — ' + (data && data.message_count || 0) + ' message(s), ' + (data && data.turn_count || 0) + ' turn(s)';
     var container = document.getElementById('threadMessages');
     container.innerHTML = '';
 
-    // --- Collapse state: only manual toggles are persisted ---
-    var manualOverrides = sessionCollapseState[sid] || {};
+    var manualOverrides = sessionCollapseState[ck] || {};
+    var streaming = false;
 
-    // Find the "last meaningful pair": walk backward to find the last request
-    // that is NOT an intermediate tool-call turn (finish_reason !== 'tool_calls')
-    // and whose user message is a real user question (not a tool result).
-    var lastUserReqId = '';
-    var lastAnswerReqId = '';
-    for (var ri = requests.length - 1; ri >= 0; ri--) {
-      var r = requests[ri];
-      if (!lastAnswerReqId && r.finish_reason !== 'tool_calls') {
-        lastAnswerReqId = r.request_id || '';
+    segments.forEach(function (seg, segIdx) {
+      if (segIdx > 0) {
+        var divider = document.createElement('div');
+        divider.className = 'thread-segment-divider';
+        divider.textContent = '— context compacted (new segment) —';
+        container.appendChild(divider);
       }
-      if (!lastUserReqId && !lastMessageIsToolResult(r.request_body, r.prompt_text)) {
-        lastUserReqId = r.request_id || '';
-      }
-      if (lastAnswerReqId && lastUserReqId) break;
-    }
-
-    function isCollapsed(msgKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall) {
-      if (msgKey in manualOverrides) return manualOverrides[msgKey];
-      var parts = msgKey.split(':');
-      var half = parts[parts.length - 1];
-      if (half === 'user') {
-        if (isToolResult) return true;
-        return !isLastUserMsg;
-      }
-      if (isIntermediateToolCall) return true;
-      return !isLastAnswerMsg;
-    }
-
-    // Show system message once at the top of the thread (from first request that has one)
-    var systemMsg = null;
-    for (var si = 0; si < requests.length; si++) {
-      if (requests[si].system_message) { systemMsg = requests[si].system_message; break; }
-    }
-    if (systemMsg) {
-      var sysKey = 'system';
-      var sysCollapsed = isCollapsed(sysKey, false);
-      var sysDiv = document.createElement('div');
-      sysDiv.className = 'thread-msg system' + (sysCollapsed ? ' collapsed' : '');
-      sysDiv.innerHTML =
-        '<div class="role">System</div>' +
-        '<div class="body">' + escapeHtml(systemMsg) + '</div>';
-      addGutterAndPreview(sysDiv, sysKey, systemMsg, sid);
-      container.appendChild(sysDiv);
-    }
-    requests.forEach(function (req) {
-      var reqId = req.request_id || '';
-      var userTime = req.timestamp_received ? new Date(req.timestamp_received).toLocaleString() : '';
-      var asstDuration = fmtDurationShort(req.duration_seconds);
-      var isLive = (req.status === 'processing' || req.status === 'queued');
-      var isLastUserMsg = (reqId === lastUserReqId);
-      var isLastAnswerMsg = (reqId === lastAnswerReqId);
-      var isToolResult = lastMessageIsToolResult(req.request_body, req.prompt_text);
-      var isIntermediateToolCall = (req.finish_reason === 'tool_calls');
-
-      // Determine assistant body: use live accumulated text if available, else API response_text or error_message
-      var responseBody = '';
-      var responseRawText = '';
-      if (liveAccumulated[reqId]) {
-        responseBody = escapeHtml(liveAccumulated[reqId]);
-        responseRawText = liveAccumulated[reqId];
+      var msgs = seg.messages;
+      if (msgs === null || msgs === undefined) {
+        var warn = document.createElement('div');
+        warn.className = 'thread-msg system';
+        warn.innerHTML = '<div class="role">History unavailable</div>' +
+          '<div class="body">This request body was not stored in full (a MAX_REQUEST_BODY_BYTES cap is set), so earlier messages cannot be shown.</div>';
+        container.appendChild(warn);
       } else {
-        var respText = req.response_text || '';
-        if (!respText && req.error_message) respText = req.error_message;
-        responseRawText = respText;
-        responseBody = (respText && (respText.indexOf('[HTTP') === 0 || respText.indexOf('[Error]') === 0))
-          ? escapeHtml(respText)
-          : renderMarkdown(respText);
+        msgs.forEach(function (m, mi) {
+          container.appendChild(renderMessageBlock(ck, segIdx, mi, m, manualOverrides));
+        });
       }
-      var isError = req.status === 'error';
-
-      // User / Tool-result message
-      var userKey = reqId + ':user';
-      var userCollapsed = isCollapsed(userKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall);
-      var userDiv = document.createElement('div');
-      var userCls = 'thread-msg ' + (isToolResult ? 'tool thread-msg-tool-turn' : 'user');
-      userDiv.className = userCls + (userCollapsed ? ' collapsed' : '');
-      var userRoleLabel = isToolResult ? 'Tool Result' : 'User';
-      var toolResultsInUserDiv = isToolResult ? renderToolResultsFromBody(req.request_body) : '';
-      var userBodyContent = isToolResult && toolResultsInUserDiv
-        ? toolResultsInUserDiv
-        : '<div class="body">' + escapeHtml(req.prompt_text || '') + '</div>';
-      userDiv.innerHTML =
-        '<div class="role">' + userRoleLabel + ' · ' + escapeHtml(req.ip_address || '') + ' · ' + escapeHtml(userTime) +
-        ' <button class="meta-toggle" title="Show metadata">&#9432;</button></div>' +
-        userBodyContent +
-        '<div class="thread-meta hidden"></div>';
-      userDiv.querySelector('.meta-toggle').addEventListener('click', function (e) {
-        e.stopPropagation();
-        var metaDiv = userDiv.querySelector('.thread-meta');
-        if (metaDiv.classList.contains('hidden')) {
-          metaDiv.innerHTML = buildInlineMeta(req);
-          metaDiv.classList.remove('hidden');
-        } else {
-          metaDiv.classList.add('hidden');
-        }
-      });
-      addGutterAndPreview(userDiv, userKey, isToolResult ? (req.prompt_text || 'Tool result') : req.prompt_text, sid);
-      container.appendChild(userDiv);
-
-      // Assistant message
-      var asstKey = reqId + ':assistant';
-      var asstCollapsed = isCollapsed(asstKey, isLastUserMsg, isLastAnswerMsg, isToolResult, isIntermediateToolCall);
-      var hasThinking = !!(req.thinking_text && req.thinking_text.trim());
-      var liveThinking = isLive && (liveThinkingAccumulated[reqId] || '');
-      var thinkingHtml = '';
-      if (hasThinking || liveThinking) {
-        var thinkingContent = (req.thinking_text && req.thinking_text.trim()) || liveThinking || '';
-        var thinkingEscaped = escapeHtml(thinkingContent);
-        var thinkingOpen = isLive && liveThinking && !(liveAccumulated[reqId] || responseBody);
-        thinkingHtml = '<details class="thread-thinking' + (isLive ? ' thread-thinking-live' : '') + '"' + (thinkingOpen ? ' open' : '') + '><summary>Thinking</summary><pre class="thread-thinking-body' + (isLive ? ' streamable-thinking' : '') + '">' + thinkingEscaped + '</pre></details>';
-      }
-      var asstDiv = document.createElement('div');
-      var asstCls = 'thread-msg' + (isIntermediateToolCall ? ' thread-msg-tool-turn' : '') + (isLive ? ' thread-msg-live' : '') + (isError ? ' thread-msg-error' : '');
-      asstDiv.className = asstCls + (asstCollapsed ? ' collapsed' : '');
-      asstDiv.setAttribute('data-request-id', reqId);
-      if (reqId) assistantRowByRid[reqId] = asstDiv;
-      var stopCtl = '';
-      if (isLive && getKey() && reqId) {
-        if (req.status === 'processing') {
-          stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(reqId) + '" data-act="stop">Stop</button>';
-        } else if (req.status === 'queued') {
-          stopCtl = ' <button type="button" class="conv-stop-btn admin-btn admin-btn-danger" style="padding:0.15rem 0.45rem;font-size:0.75rem" data-rid="' + escapeHtml(reqId) + '" data-act="cancel">Cancel</button>';
-        }
-      }
-      var toolCallsHtml = renderToolCallsHtml(req.tool_calls_json);
-      var toolResultsHtml = isToolResult ? '' : renderToolResultsFromBody(req.request_body);
-      var finishBadge = isLive ? '' : renderFinishReasonBadge(req.finish_reason);
-      var tokenHtml = isLive ? '' : renderTokenInfo(req);
-      asstDiv.innerHTML =
-        '<div class="role">Assistant · ' + escapeHtml(req.model || '') + ' · ' +
-        (isLive ? '<span class="streaming-indicator">streaming…</span>' : escapeHtml(asstDuration)) +
-        finishBadge + tokenHtml +
-        stopCtl +
-        '</div>' +
-        thinkingHtml +
-        toolResultsHtml +
-        '<div class="body ' + (isLive ? 'streamable' : 'markdown-body') + '">' + responseBody + '</div>' +
-        toolCallsHtml;
-      addGutterAndPreview(asstDiv, asstKey, responseRawText, sid);
-      container.appendChild(asstDiv);
+      if (seg.canonical_status === 'processing' || seg.canonical_status === 'queued') streaming = true;
+      container.appendChild(renderFinalAssistant(ck, segIdx, seg, model, manualOverrides));
     });
 
     container.onclick = function (ev) {
@@ -1151,45 +987,13 @@
         : API_BASE + '/cancel-request/' + encodeURIComponent(rid);
       adminPost(url, undefined, function () { loadSessions(); loadHome(); });
     };
-    // Only auto-scroll when explicitly requested (user open / live auto-open) or when
-    // THIS conversation is actively streaming. Prevents a background conversation's
-    // stream from scrolling the thread the user is currently reading.
-    var threadIsStreaming = requests.some(function (r) {
-      var rid = r.request_id;
-      return r.status === 'processing' || r.status === 'queued' ||
-        !!liveAccumulated[rid] || !!liveThinkingAccumulated[rid];
-    });
-    if (forceScroll || threadIsStreaming) {
+
+    // Auto-scroll only on explicit open or when THIS conversation is streaming (never yank a
+    // conversation the user is reading because a different one is streaming — chunks are gated
+    // server-side to the open conversation anyway).
+    if (forceScroll || streaming) {
       requestAnimationFrame(function () { scrollThreadToBottom(); });
     }
-  }
-
-  function buildInlineMeta(req) {
-    var rows = [
-      ['Request ID', req.request_id],
-      ['IP', req.ip_address],
-      ['Model', req.model],
-      ['Status', req.status],
-      ['Finish Reason', req.finish_reason],
-      ['Duration', fmtDuration(req.duration_seconds)],
-      ['Queue wait', fmtDuration(req.queue_wait_seconds)],
-      ['Processing', fmtDuration(req.processing_time_seconds)],
-      ['Input tokens', req.prompt_eval_count],
-      ['Output tokens', req.eval_count],
-      ['Priority', req.priority_score],
-      ['Session', req.session_id],
-      ['Endpoint', req.endpoint],
-      ['User-Agent', req.user_agent],
-      ['Received', req.timestamp_received],
-      ['Started', req.timestamp_started],
-      ['Completed', req.timestamp_completed],
-      ['Error', req.error_message],
-      ['Tools available', req.tools_available]
-    ].filter(function (r) { return r[1] != null && r[1] !== ''; });
-    var html = '<table class="inline-meta-table"><tbody>';
-    rows.forEach(function (r) { html += '<tr><td class="meta-key">' + escapeHtml(String(r[0])) + '</td><td>' + escapeHtml(String(r[1])) + '</td></tr>'; });
-    html += '</tbody></table>';
-    return html;
   }
 
   /* ================================================================

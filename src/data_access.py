@@ -134,7 +134,7 @@ class RequestLogRepository:
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None, incoming_conversation_fingerprint: Optional[str] = None, session_matched_request_id: Optional[str] = None, prefix_message_count: Optional[int] = None) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None, incoming_conversation_fingerprint: Optional[str] = None, session_matched_request_id: Optional[str] = None, prefix_message_count: Optional[int] = None, conversation_id: Optional[str] = None, conversation_key: Optional[str] = None, message_count: Optional[int] = None) -> Optional[RequestLog]:
         """
         Log or update a request
 
@@ -152,6 +152,9 @@ class RequestLogRepository:
             processing_time_seconds: Optional processing time in seconds
             session_id: Optional session id for conversation grouping
             outgoing_conversation_fingerprint: Optional hash of messages+response for matching next request's prefix
+            conversation_id: Optional raw client-provided conversation id header value
+            conversation_key: Optional stable grouping key (cid:... from header, or hk:... head-key)
+            message_count: Optional len(messages) in this request (canonical selection)
             endpoint: Optional API path e.g. /api/chat, /v1/chat/completions
             user_agent: Optional User-Agent request header
             thinking_text: Optional reasoning/thinking trace from thinking models
@@ -189,6 +192,12 @@ class RequestLogRepository:
                     request_log.processing_time_seconds = processing_time_seconds
                 if session_id is not None:
                     request_log.session_id = session_id
+                if conversation_id is not None:
+                    request_log.conversation_id = conversation_id
+                if conversation_key is not None:
+                    request_log.conversation_key = conversation_key
+                if message_count is not None:
+                    request_log.message_count = message_count
                 if outgoing_conversation_fingerprint is not None:
                     request_log.outgoing_conversation_fingerprint = outgoing_conversation_fingerprint
                 if endpoint is not None:
@@ -238,6 +247,9 @@ class RequestLogRepository:
                     queue_wait_seconds=queue_wait_seconds,
                     processing_time_seconds=processing_time_seconds,
                     session_id=session_id,
+                    conversation_id=conversation_id,
+                    conversation_key=conversation_key,
+                    message_count=message_count,
                     outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
                     timestamp_completed=datetime.utcnow() if status in ["completed", "error"] else None,
                     endpoint=endpoint,
@@ -307,6 +319,9 @@ class RequestLogRepository:
                 'prompt_text': prompt_text,
                 'response_text': response_text,
                 'session_id': session_id,
+                'conversation_id': conversation_id,
+                'conversation_key': conversation_key,
+                'message_count': message_count,
                 'outgoing_conversation_fingerprint': outgoing_conversation_fingerprint,
                 'incoming_conversation_fingerprint': incoming_conversation_fingerprint,
                 'session_matched_request_id': session_matched_request_id,
@@ -346,6 +361,9 @@ class RequestLogRepository:
                 status=status,
                 error_message="Request completed with status: error" if status == "error" else None,
                 session_id=session_id,
+                conversation_id=conversation_id,
+                conversation_key=conversation_key,
+                message_count=message_count,
                 outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
                 incoming_conversation_fingerprint=incoming_conversation_fingerprint,
                 session_matched_request_id=session_matched_request_id,
