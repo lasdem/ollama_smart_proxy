@@ -163,6 +163,38 @@ def migrate_to_v3():
     logger.info("Migration v3 complete")
 
 
+def migrate_to_v5():
+    """
+    Migration v5: Add conversation chaining diagnostics columns
+    (incoming_conversation_fingerprint, session_matched_request_id, prefix_message_count).
+    """
+    logger.info("Running migration v5: Add conversation chaining diagnostics columns")
+    db = get_db()
+    session = db.get_session()
+    try:
+        inspector = inspect(db.engine)
+        columns = [c["name"] for c in inspector.get_columns("request_logs")]
+        for col_name, col_ddl in [
+            ("incoming_conversation_fingerprint", "VARCHAR(64)"),
+            ("session_matched_request_id", "VARCHAR(255)"),
+            ("prefix_message_count", "INTEGER"),
+        ]:
+            if col_name not in columns:
+                session.execute(text(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_ddl}"))
+                session.commit()
+                logger.info("Added %s column to request_logs", col_name)
+            else:
+                logger.info("%s column already exists", col_name)
+        record_migration(5, "Add conversation chaining diagnostics columns")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Migration v5 failed: {e}")
+        raise
+    finally:
+        session.close()
+    logger.info("Migration v5 complete")
+
+
 def _truncate_analytics_rollups(session, is_pg: bool) -> None:
     """Clear rollup tables so backfill replaces partial/live data with a full request_logs aggregate."""
     tables = (
@@ -422,6 +454,7 @@ def run_migrations(target_version: int = None):
         2: migrate_to_v2,
         3: migrate_to_v3,
         4: migrate_to_v4,
+        5: migrate_to_v5,
     }
     
     # Determine which migrations to run

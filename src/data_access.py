@@ -134,7 +134,7 @@ class RequestLogRepository:
         finally:
             session.close()
 
-    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None) -> Optional[RequestLog]:
+    def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None, incoming_conversation_fingerprint: Optional[str] = None, session_matched_request_id: Optional[str] = None, prefix_message_count: Optional[int] = None) -> Optional[RequestLog]:
         """
         Log or update a request
 
@@ -157,6 +157,9 @@ class RequestLogRepository:
             thinking_text: Optional reasoning/thinking trace from thinking models
             request_body: Optional full request body (JSON string), e.g. for raw JSON view
             system_message: Optional system prompt from messages[role=system] or top-level 'system' field
+            incoming_conversation_fingerprint: Optional hash of this request's message prefix (chain diagnostics)
+            session_matched_request_id: Optional request_id this request chained from (NULL = new session)
+            prefix_message_count: Optional number of messages in the hashed prefix
 
         Returns:
             RequestLog: Request log object or None if not found
@@ -208,6 +211,12 @@ class RequestLogRepository:
                     request_log.eval_count = eval_count
                 if tools_available is not None:
                     request_log.tools_available = tools_available
+                if incoming_conversation_fingerprint is not None:
+                    request_log.incoming_conversation_fingerprint = incoming_conversation_fingerprint
+                if session_matched_request_id is not None:
+                    request_log.session_matched_request_id = session_matched_request_id
+                if prefix_message_count is not None:
+                    request_log.prefix_message_count = prefix_message_count
 
                 if status == "completed":
                     request_log.timestamp_completed = datetime.utcnow()
@@ -241,6 +250,9 @@ class RequestLogRepository:
                     prompt_eval_count=prompt_eval_count,
                     eval_count=eval_count,
                     tools_available=tools_available,
+                    incoming_conversation_fingerprint=incoming_conversation_fingerprint,
+                    session_matched_request_id=session_matched_request_id,
+                    prefix_message_count=prefix_message_count,
                 )
                 session.add(request_log)
             
@@ -296,6 +308,9 @@ class RequestLogRepository:
                 'response_text': response_text,
                 'session_id': session_id,
                 'outgoing_conversation_fingerprint': outgoing_conversation_fingerprint,
+                'incoming_conversation_fingerprint': incoming_conversation_fingerprint,
+                'session_matched_request_id': session_matched_request_id,
+                'prefix_message_count': prefix_message_count,
                 'endpoint': endpoint,
                 'user_agent': user_agent,
                 'thinking_text': thinking_text,
@@ -332,6 +347,9 @@ class RequestLogRepository:
                 error_message="Request completed with status: error" if status == "error" else None,
                 session_id=session_id,
                 outgoing_conversation_fingerprint=outgoing_conversation_fingerprint,
+                incoming_conversation_fingerprint=incoming_conversation_fingerprint,
+                session_matched_request_id=session_matched_request_id,
+                prefix_message_count=prefix_message_count,
                 created_at=datetime.utcnow()
             )
         finally:

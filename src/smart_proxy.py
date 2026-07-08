@@ -400,6 +400,10 @@ async def enqueue_request(request: Request, path: str):
     # Content-based session: same session when request's message prefix matches a previous request's messages+response
     # Default: unique per request so concurrent single-turn requests don't collapse into one session
     session_id = f"{client_ip}_{model_name}_{req_id}"
+    # Chain diagnostics: persist what this request looked for and whether it matched.
+    incoming_fp = None
+    session_matched_request_id = None
+    prefix_message_count = None
     try:
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
         if len(messages) > 1:
@@ -414,6 +418,7 @@ async def enqueue_request(request: Request, path: str):
                     entry["tool_call_id"] = m["tool_call_id"]
                 prefix.append(entry)
             if prefix:
+                prefix_message_count = len(prefix)
                 incoming_fp = hashlib.sha256(json.dumps(prefix, sort_keys=True).encode()).hexdigest()
                 existing = await asyncio.to_thread(
                     request_repo.get_request_by_ip_and_outgoing_fingerprint,
@@ -422,10 +427,23 @@ async def enqueue_request(request: Request, path: str):
                 )
                 if existing and existing.session_id:
                     session_id = existing.session_id
+                    session_matched_request_id = existing.request_id
     except Exception as e:
         logger.debug("Session reuse check failed: %s", e)
 
     queued_req.session_id = session_id
+    # Diagnostic trace of the session-chaining decision (correlate live splits during test runs).
+    logger.debug(
+        "session_chain_decision",
+        extra={
+            "request_id": req_id,
+            "incoming_fp": (incoming_fp[:12] if incoming_fp else None),
+            "matched": bool(session_matched_request_id),
+            "matched_request_id": session_matched_request_id,
+            "prefix_message_count": prefix_message_count,
+            "session_id": session_id,
+        },
+    )
 
     # Full request body for raw JSON view (truncate to ~256KB)
     request_body_str = None
@@ -446,6 +464,9 @@ async def enqueue_request(request: Request, path: str):
         request_body=request_body_str,
         system_message=system_message,
         tools_available=tools_available,
+        incoming_conversation_fingerprint=incoming_fp,
+        session_matched_request_id=session_matched_request_id,
+        prefix_message_count=prefix_message_count,
     )
     
     async with queue_lock:

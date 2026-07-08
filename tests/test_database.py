@@ -222,6 +222,34 @@ class TestRequestLogRepository:
         assert updated_log.response_text == 'Hello, test!'
         assert updated_log.duration_seconds == 5.0
     
+    def test_log_request_persists_chain_diagnostics_fields(self, request_repo):
+        """log_request stores and preserves the chain-diagnostics fields across queue->completion."""
+        # Queue-time insert with diagnostics fields set.
+        created = request_repo.log_request(
+            "diag-req-1", "10.0.0.5", "gpt-4", "queued", 0, 5,
+            prompt_text="continue",
+            session_id="10.0.0.5_gpt-4_diag-req-1",
+            incoming_conversation_fingerprint="a" * 64,
+            session_matched_request_id="diag-req-0",
+            prefix_message_count=3,
+        )
+        assert created is not None
+        assert created.incoming_conversation_fingerprint == "a" * 64
+        assert created.session_matched_request_id == "diag-req-0"
+        assert created.prefix_message_count == 3
+
+        # Completion update does NOT pass the diagnostics fields; they must be preserved.
+        updated = request_repo.log_request(
+            "diag-req-1", "10.0.0.5", "gpt-4", "completed", 1.2, 5,
+            response_text="done",
+            outgoing_conversation_fingerprint="b" * 64,
+        )
+        assert updated is not None
+        assert updated.incoming_conversation_fingerprint == "a" * 64
+        assert updated.session_matched_request_id == "diag-req-0"
+        assert updated.prefix_message_count == 3
+        assert updated.outgoing_conversation_fingerprint == "b" * 64
+
     def test_get_request_logs_by_model(self, request_repo):
         """Test retrieving request logs by model name"""
         now = datetime.utcnow()

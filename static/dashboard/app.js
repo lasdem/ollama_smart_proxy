@@ -842,6 +842,87 @@
       })
       .catch(function (e) { console.error('Load sessions failed:', e); });
   }
+  /* -- Chain diagnostics (why conversations split) -- */
+  function renderConvDiagnostics(data) {
+    var body = document.getElementById('convDiagBody');
+    var summary = document.getElementById('convDiagSummary');
+    if (!body) return;
+    if (summary) {
+      summary.textContent = data.count + ' request(s) · ' + data.break_count + ' break(s) · ' +
+        data.proxy_miss_count + ' proxy miss · ' + data.client_divergence_count + ' client divergence';
+    }
+    var breaksByRid = {};
+    (data.breaks || []).forEach(function (b) { breaksByRid[b.request_id] = b; });
+    var rows = (data.requests || []).map(function (r) {
+      var brk = breaksByRid[r.request_id];
+      var breakCell = '';
+      if (brk) {
+        var cls = brk.classification === 'proxy_miss' ? 'diag-break-proxy' : 'diag-break-client';
+        breakCell = '<span class="diag-break ' + cls + '">' + escapeHtml(brk.classification) + '</span>';
+      } else if (r.session_matched_request_id) {
+        breakCell = '<span class="diag-chained">chained</span>';
+      }
+      var detail = '';
+      if (brk && brk.classification === 'client_divergence' && brk.divergence) {
+        var d = brk.divergence;
+        if (d.available && d.index != null) {
+          var exp = d.expected ? (escapeHtml(d.expected.role) + ': ' + escapeHtml(d.expected.content || '')) : '(none)';
+          var act = d.actual ? (escapeHtml(d.actual.role) + ': ' + escapeHtml(d.actual.content || '')) : '(none)';
+          detail = '<div class="diag-divergence">First divergence at message #' + d.index +
+            (d.note ? ' (' + escapeHtml(d.note) + ')' : '') +
+            '<div class="diag-diff"><span class="diag-diff-label">expected</span><pre>' + exp + '</pre></div>' +
+            '<div class="diag-diff"><span class="diag-diff-label">actual</span><pre>' + act + '</pre></div></div>';
+        } else if (d && !d.available) {
+          detail = '<div class="diag-divergence diag-muted">' + escapeHtml(d.reason || 'divergence detail unavailable') + '</div>';
+        }
+      } else if (brk && brk.classification === 'proxy_miss') {
+        detail = '<div class="diag-divergence">Matching prior fingerprint existed (request ' +
+          escapeHtml((brk.matched_prior_request_id || '').slice(0, 12)) + '…) but was not linked.</div>';
+      }
+      var t = r.timestamp_received ? new Date(r.timestamp_received).toLocaleString() : '';
+      return '<tr class="' + (brk ? 'diag-row-break' : '') + '">' +
+        '<td><code>' + escapeHtml((r.request_id || '').slice(0, 12)) + '…</code></td>' +
+        '<td>' + escapeHtml(t) + '</td>' +
+        '<td>' + escapeHtml(r.model || '') + '</td>' +
+        '<td class="dash-num">' + (r.message_count != null ? r.message_count : '—') + '</td>' +
+        '<td class="dash-num">' + (r.prefix_message_count != null ? r.prefix_message_count : '—') + '</td>' +
+        '<td><code>' + escapeHtml(r.incoming_fp || '—') + '</code></td>' +
+        '<td><code>' + escapeHtml(r.outgoing_fp || '—') + '</code></td>' +
+        '<td>' + breakCell + detail + '</td>' +
+        '</tr>';
+    }).join('');
+    body.innerHTML = '<div class="table-wrap"><table class="dash-table diag-table"><thead><tr>' +
+      '<th>Request</th><th>Time</th><th>Model</th><th>Msgs</th><th>Prefix</th><th>In FP</th><th>Out FP</th><th>Chain</th>' +
+      '</tr></thead><tbody>' + (rows || '<tr><td colspan="8" class="dash-muted">No requests for this filter</td></tr>') + '</tbody></table></div>';
+  }
+
+  function loadConvDiagnostics() {
+    var key = getKey();
+    if (!key) { setAuthStatus(false, 'Set key first'); return; }
+    var modelEl = document.getElementById('convFilterModel');
+    var ipEl = document.getElementById('convFilterIp');
+    var model = modelEl && modelEl.value ? modelEl.value.trim() : '';
+    var ip = ipEl && ipEl.value ? ipEl.value.trim() : '';
+    var url = API_BASE + '/conversation_diagnostics?limit=500';
+    if (model) url += '&model=' + encodeURIComponent(model);
+    if (ip) url += '&ip_address=' + encodeURIComponent(ip);
+    var panel = document.getElementById('convDiagnostics');
+    var body = document.getElementById('convDiagBody');
+    if (panel) panel.classList.remove('hidden');
+    if (body) body.innerHTML = '<div class="dash-muted">Loading…</div>';
+    fetch(url, { headers: apiHeaders() })
+      .then(function (r) { if (r.status === 403) throw new Error('Forbidden'); return r.json(); })
+      .then(function (data) { renderConvDiagnostics(data); })
+      .catch(function (e) { if (body) body.innerHTML = '<div class="dash-muted">Failed: ' + escapeHtml(e.message || String(e)) + '</div>'; });
+  }
+  var loadConvDiagBtn = document.getElementById('loadConvDiagnostics');
+  if (loadConvDiagBtn) loadConvDiagBtn.addEventListener('click', loadConvDiagnostics);
+  var closeConvDiagBtn = document.getElementById('closeConvDiagnostics');
+  if (closeConvDiagBtn) closeConvDiagBtn.addEventListener('click', function () {
+    var panel = document.getElementById('convDiagnostics');
+    if (panel) panel.classList.add('hidden');
+  });
+
   document.getElementById('loadSessions').addEventListener('click', function () { convPageOffset = 0; loadSessions(); });
   ['convFilterModel', 'convFilterIp'].forEach(function (id) {
     var el = document.getElementById(id);

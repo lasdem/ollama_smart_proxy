@@ -3,6 +3,7 @@
 ---
 
 ## Done
+- [x] v4.14: Conversation chaining diagnostics — persist `incoming_conversation_fingerprint`, `session_matched_request_id`, `prefix_message_count`; new `GET /proxy/conversation_diagnostics` admin endpoint that classifies chain breaks as `proxy_miss` vs `client_divergence` (with first divergent message) plus a Conversations-tab "Chain diagnostics" panel and a `session_chain_decision` debug log. No matching-algorithm change yet (deferred until Copilot data gathered). Auto-migration adds 3 nullable columns + `ix_ip_incoming_fp` (see changelog/v4.14_CONVERSATION_CHAINING_DIAGNOSTICS.md)
 - [x] v4.13: Dashboard — Conversations Model/IP filters (mirror Request History via `conversation_sessions` `model`/`ip_address`); fix thread auto-scroll so only the open+streaming conversation scrolls; outlined non-interactive `finish_reason` badges (no longer look like Stop buttons); real Stop/Cancel actions on Request History active rows only (see changelog/v4.13_DASHBOARD_CONV_FILTERS_SCROLL_STOP.md)
 - [x] v4.12: Embedding usage logging — route `/api/embed`, `/api/embeddings`, `/v1/embeddings` through the queue so embedding models are logged to `request_logs` and rolled up into `analytics_*_by_model`; extract `input` field for prompt_text; friendlier `[Embeddings response]` label (see changelog/v4.12_EMBEDDING_USAGE_LOGGING.md)
 - [x] v4.11: Dashboard pagination — Request History uses `query_db` offset + pager; Conversations use `GET /proxy/conversation_sessions` + full-thread fetch by `session_id`; `query_db` supports `session_id=no-session` bucket (see changelog/v4.11_DASHBOARD_PAGINATION.md)
@@ -26,5 +27,6 @@
 ---
 
 ## TODO NEXT
+- [ ] Conversation chaining enhancement (Phase 2, after v4.14 diagnostics data): based on `/proxy/conversation_diagnostics` findings from real Copilot runs, evaluate longest-common-prefix matching, tolerance for injected/trimmed messages, and an IP+model+time-window fallback to reduce `client_divergence` splits.
 
 ---

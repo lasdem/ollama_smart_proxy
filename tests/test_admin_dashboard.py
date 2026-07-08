@@ -249,6 +249,78 @@ class TestMonitoringEndpoints:
         assert data["total_count"] == 0
         assert data["sessions"] == []
 
+    def test_conversation_diagnostics_classifies_breaks(self):
+        """conversation_diagnostics returns per-request signals and classifies chain breaks."""
+        import json as _json
+        from data_access import init_repositories, get_request_log_repo
+        init_repositories()
+        repo = get_request_log_repo()
+        ip = "203.0.113.88"  # isolated test IP
+
+        def body(msgs):
+            return _json.dumps({"messages": msgs})
+
+        # Turn 1 (no prefix) -> produces outgoing fingerprint FP1.
+        repo.log_request(
+            "diag-A", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="hello", response_text="hi there", session_id="S1",
+            request_body=body([{"role": "user", "content": "hello"}]),
+            outgoing_conversation_fingerprint="FP1",
+        )
+        # Chained continuation: matched to A -> NOT a break.
+        repo.log_request(
+            "diag-B", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="next", response_text="ok", session_id="S1",
+            request_body=body([
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"},
+                {"role": "user", "content": "next"},
+            ]),
+            incoming_conversation_fingerprint="FP1",
+            session_matched_request_id="diag-A",
+            prefix_message_count=2,
+            outgoing_conversation_fingerprint="FP2",
+        )
+        # Continuation whose prefix matches no prior outgoing fp -> client_divergence.
+        repo.log_request(
+            "diag-C", ip, "gpt-4", "queued", 0, 5,
+            prompt_text="more", session_id="10.x_gpt-4_diag-C",
+            request_body=body([
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "COMPLETELY DIFFERENT"},
+                {"role": "user", "content": "more"},
+            ]),
+            incoming_conversation_fingerprint="FPX",
+            prefix_message_count=2,
+        )
+        # Continuation whose prefix DOES match a prior outgoing fp but wasn't linked -> proxy_miss.
+        repo.log_request(
+            "diag-D", ip, "gpt-4", "queued", 0, 5,
+            prompt_text="again", session_id="10.x_gpt-4_diag-D",
+            request_body=body([
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi there"},
+                {"role": "user", "content": "again"},
+            ]),
+            incoming_conversation_fingerprint="FP1",
+            prefix_message_count=2,
+        )
+
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_diagnostics",
+            headers=headers,
+            params={"ip_address": ip, "limit": 100},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert {"count", "break_count", "requests", "breaks"} <= set(data.keys())
+        classes = {b["request_id"]: b["classification"] for b in data["breaks"]}
+        assert classes.get("diag-C") == "client_divergence"
+        assert classes.get("diag-D") == "proxy_miss"
+        assert "diag-B" not in classes  # chained request is not a break
+
     def test_query_db_offset_returns_metadata(self):
         """query_db honors offset and returns total_count for pagination UI."""
         headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}

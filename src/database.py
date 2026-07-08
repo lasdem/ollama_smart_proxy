@@ -60,6 +60,9 @@ class RequestLog(Base):
     error_message = Column(Text)
     session_id = Column(String(255), nullable=True, index=True)  # content-based conversation grouping
     outgoing_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of messages+response for session matching
+    incoming_conversation_fingerprint = Column(String(64), nullable=True, index=True)  # hash of this request's message prefix (for chain diagnostics)
+    session_matched_request_id = Column(String(255), nullable=True)  # request_id this request chained from (NULL = new session)
+    prefix_message_count = Column(Integer, nullable=True)  # number of messages in the hashed prefix (surfaces context trim/inject)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     endpoint = Column(String(255), nullable=True)  # e.g. /api/chat, /v1/chat/completions
     user_agent = Column(String(512), nullable=True)  # From request header User-Agent
@@ -74,6 +77,7 @@ class RequestLog(Base):
 
     __table_args__ = (
         Index('ix_ip_outgoing_fp', 'source_ip', 'outgoing_conversation_fingerprint'),
+        Index('ix_ip_incoming_fp', 'source_ip', 'incoming_conversation_fingerprint'),
         Index('ix_timestamp_model', 'timestamp_received', 'model_name'),
         # query_db: time range + sort by completed (dashboard "recent")
         Index('ix_tsrecv_tcomp', 'timestamp_received', 'timestamp_completed'),
@@ -275,6 +279,9 @@ class DatabaseConnection:
                     ("prompt_eval_count", "INTEGER"),
                     ("eval_count", "INTEGER"),
                     ("tools_available", "TEXT"),
+                    ("incoming_conversation_fingerprint", "VARCHAR(64)"),
+                    ("session_matched_request_id", "VARCHAR(255)"),
+                    ("prefix_message_count", "INTEGER"),
                 ]:
                     if col_name not in existing:
                         conn.execute(text(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_ddl}"))
@@ -298,6 +305,10 @@ class DatabaseConnection:
                     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_status_tsrecv ON request_logs (status, timestamp_received)"))
                     conn.commit()
                     logger.info("Added composite index ix_status_tsrecv")
+                if "ix_ip_incoming_fp" not in existing_indexes:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ip_incoming_fp ON request_logs (source_ip, incoming_conversation_fingerprint)"))
+                    conn.commit()
+                    logger.info("Added composite index ix_ip_incoming_fp")
         except Exception as e:
             logger.warning("Migration add columns failed (may already exist): %s", e)
     
@@ -456,6 +467,9 @@ class DatabaseConnection:
                             error_message=record.get('error_message'),
                             session_id=record.get('session_id'),
                             outgoing_conversation_fingerprint=record.get('outgoing_conversation_fingerprint'),
+                            incoming_conversation_fingerprint=record.get('incoming_conversation_fingerprint'),
+                            session_matched_request_id=record.get('session_matched_request_id'),
+                            prefix_message_count=record.get('prefix_message_count'),
                             created_at=datetime.fromisoformat(record.get('created_at')) if record.get('created_at') else datetime.utcnow()
                         )
                         
