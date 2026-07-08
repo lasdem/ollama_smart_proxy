@@ -240,8 +240,8 @@ async def test_tee_stream_on_done_called_on_timeout():
         yield b'{"message":{"content":"x"}}\n'
         await asyncio.sleep(10)
 
-    async def on_done(rid, content, thinking):
-        done_calls.append((rid, content, thinking))
+    async def on_done(rid, content, thinking, meta=None):
+        done_calls.append((rid, content, thinking, meta))
 
     with pytest.raises(asyncio.TimeoutError):
         async for _ in tee_stream(stall_iter(), "/api/chat", "req-done", on_done=on_done, chunk_timeout=0.1):
