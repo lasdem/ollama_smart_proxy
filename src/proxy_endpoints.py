@@ -313,8 +313,20 @@ async def query_db(
     if sort_order.lower() not in ["asc", "desc"]:
         raise HTTPException(status_code=400, detail="sort_order must be 'asc' or 'desc'")
     
+    db = get_db()
+    empty_page = {
+        "total_count": 0,
+        "limit": limit,
+        "offset": offset,
+        "count": 0,
+        "requests": [],
+    }
+    if not db.is_available():
+        logger.warning("query_db: database unavailable, returning empty page")
+        return empty_page
+
+    session = None
     try:
-        db = get_db()
         session = db.get_session()
         
         # Start building query
@@ -429,8 +441,6 @@ async def query_db(
                 for record in requests_data
             ]
         
-        session.close()
-        
         return {
             "total_count": total_count,
             "limit": limit,
@@ -442,8 +452,15 @@ async def query_db(
     except HTTPException:
         raise
     except Exception as e:
+        # Degrade gracefully on DB outage instead of returning a 500 to the dashboard.
         logger.error(f"Failed to query database: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to query database: {str(e)}")
+        return empty_page
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 @router.get("/conversation_sessions")
@@ -471,8 +488,20 @@ async def conversation_sessions(
         raise HTTPException(status_code=400, detail="offset must be >= 0")
 
     db = get_db()
-    db_sess = db.get_session()
+    empty_sessions = {
+        "total_count": 0,
+        "limit": limit,
+        "offset": offset,
+        "count": 0,
+        "sessions": [],
+    }
+    if not db.is_available():
+        logger.warning("conversation_sessions: database unavailable, returning empty list")
+        return empty_sessions
+
+    db_sess = None
     try:
+        db_sess = db.get_session()
         first_row = aliased(RequestLog)
         # New rows group by conversation_key; legacy rows fall back to session_id, then a shared bucket.
         conv_key = func.coalesce(
@@ -562,9 +591,13 @@ async def conversation_sessions(
         raise
     except Exception as e:
         logger.error("Failed to list conversation sessions: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to list conversation sessions: {e}")
+        return empty_sessions
     finally:
-        db_sess.close()
+        if db_sess is not None:
+            try:
+                db_sess.close()
+            except Exception:
+                pass
 
 
 def _parse_body_messages(body_json: Optional[str]):
@@ -635,8 +668,13 @@ async def conversation_thread(request: Request, conversation_key: str):
         raise HTTPException(status_code=400, detail="conversation_key is required")
 
     db = get_db()
-    sess = db.get_session()
+    if not db.is_available():
+        logger.warning("conversation_thread: database unavailable")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
+
+    sess = None
     try:
+        sess = db.get_session()
         ck_blank = or_(RequestLog.conversation_key.is_(None), func.trim(RequestLog.conversation_key) == "")
         sid_blank = or_(RequestLog.session_id.is_(None), func.trim(RequestLog.session_id) == "")
         query = sess.query(RequestLog)
@@ -692,9 +730,13 @@ async def conversation_thread(request: Request, conversation_key: str):
         raise
     except Exception as e:
         logger.error("Failed to load conversation thread: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to load conversation thread: {e}")
+        raise HTTPException(status_code=503, detail="Database temporarily unavailable")
     finally:
-        sess.close()
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
 
 @router.get("/requests/{request_id}")

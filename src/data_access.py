@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from sqlalchemy.orm import Session
-from database import RequestLog, get_db, get_analytics
+from database import RequestLog, get_db, get_analytics, DatabaseUnavailable
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ class RequestLogRepository:
         """
         session = None
         try:
+            if not self.db.is_available():
+                raise DatabaseUnavailable("Database is unavailable")
             session = self.db.get_session()
             # Create request log
             request_log = RequestLog(
@@ -49,7 +51,10 @@ class RequestLogRepository:
             return request_log
         except Exception as e:
             if session:
-                session.rollback()
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
             logger.error(f"Failed to create request log: {e}")
             # Fallback to file-based logging
             request_data['created_at'] = datetime.utcnow()
@@ -80,7 +85,10 @@ class RequestLogRepository:
         Returns:
             RequestLog: Updated request log object or None if not found
         """
+        session = None
         try:
+            if not self.db.is_available():
+                raise DatabaseUnavailable("Database is unavailable")
             session = self.db.get_session()
             
             request_log = session.query(RequestLog).filter_by(request_id=request_id).first()
@@ -110,7 +118,11 @@ class RequestLogRepository:
             
             return request_log
         except Exception as e:
-            session.rollback()
+            if session:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
             logger.error(f"Failed to update request log: {e}")
             
             # Fallback to file-based logging for updates
@@ -132,7 +144,11 @@ class RequestLogRepository:
                 created_at=datetime.utcnow()
             )
         finally:
-            session.close()
+            if session:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def log_request(self, request_id: str, source_ip: str, model_name: str, status: str, duration_seconds: float, priority_score: int, prompt_text: Optional[str] = None, response_text: Optional[str] = None, timestamp_started: Optional[datetime] = None, queue_wait_seconds: Optional[float] = None, processing_time_seconds: Optional[float] = None, session_id: Optional[str] = None, outgoing_conversation_fingerprint: Optional[str] = None, endpoint: Optional[str] = None, user_agent: Optional[str] = None, thinking_text: Optional[str] = None, request_body: Optional[str] = None, system_message: Optional[str] = None, tool_calls_json: Optional[str] = None, finish_reason: Optional[str] = None, prompt_eval_count: Optional[int] = None, eval_count: Optional[int] = None, tools_available: Optional[str] = None, incoming_conversation_fingerprint: Optional[str] = None, session_matched_request_id: Optional[str] = None, prefix_message_count: Optional[int] = None, conversation_id: Optional[str] = None, conversation_key: Optional[str] = None, message_count: Optional[int] = None) -> Optional[RequestLog]:
         """
@@ -167,7 +183,10 @@ class RequestLogRepository:
         Returns:
             RequestLog: Request log object or None if not found
         """
+        session = None
         try:
+            if not self.db.is_available():
+                raise DatabaseUnavailable("Database is unavailable")
             session = self.db.get_session()
             
             # Check if request log already exists
@@ -308,7 +327,11 @@ class RequestLogRepository:
 
             return request_log
         except Exception as e:
-            session.rollback()
+            if session:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
             logger.error(f"Failed to log request {request_id}: {e}")
             
             # Fallback to file-based logging
@@ -371,25 +394,29 @@ class RequestLogRepository:
                 created_at=datetime.utcnow()
             )
         finally:
-            session.close()
+            if session:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def get_request_by_ip_and_outgoing_fingerprint(self, source_ip: str, fingerprint: str) -> Optional[RequestLog]:
         """Return the most recent request from this IP with this outgoing_conversation_fingerprint (for session chaining)."""
         try:
-            session = self.db.get_session()
-            request_log = (
-                session.query(RequestLog)
-                .filter_by(source_ip=source_ip, outgoing_conversation_fingerprint=fingerprint)
-                .order_by(RequestLog.timestamp_received.desc())
-                .limit(1)
-                .first()
-            )
-            return request_log
+            with self.db.session_scope() as session:
+                return (
+                    session.query(RequestLog)
+                    .filter_by(source_ip=source_ip, outgoing_conversation_fingerprint=fingerprint)
+                    .order_by(RequestLog.timestamp_received.desc())
+                    .limit(1)
+                    .first()
+                )
+        except DatabaseUnavailable:
+            logger.warning("DB unavailable; get_request_by_ip_and_outgoing_fingerprint returns None")
+            return None
         except Exception as e:
             logger.error(f"Failed to get request by IP and fingerprint: {e}")
-            raise
-        finally:
-            session.close()
+            return None
 
     def get_request_log(self, request_id: str) -> Optional[RequestLog]:
         """
@@ -402,15 +429,14 @@ class RequestLogRepository:
             RequestLog: Request log object or None if not found
         """
         try:
-            session = self.db.get_session()
-            
-            request_log = session.query(RequestLog).filter_by(request_id=request_id).first()
-            return request_log
+            with self.db.session_scope() as session:
+                return session.query(RequestLog).filter_by(request_id=request_id).first()
+        except DatabaseUnavailable:
+            logger.warning("DB unavailable; get_request_log(%s) returns None", request_id)
+            return None
         except Exception as e:
             logger.error(f"Failed to get request log: {e}")
-            raise
-        finally:
-            session.close()
+            return None
     
     def get_request_logs_by_model(self, model_name: str, limit: int = 100) -> List[RequestLog]:
         """
@@ -424,15 +450,14 @@ class RequestLogRepository:
             List[RequestLog]: List of request log objects
         """
         try:
-            session = self.db.get_session()
-            
-            request_logs = session.query(RequestLog).filter_by(model_name=model_name).order_by(RequestLog.timestamp_received.desc()).limit(limit).all()
-            return request_logs
+            with self.db.session_scope() as session:
+                return session.query(RequestLog).filter_by(model_name=model_name).order_by(RequestLog.timestamp_received.desc()).limit(limit).all()
+        except DatabaseUnavailable:
+            logger.warning("DB unavailable; get_request_logs_by_model returns []")
+            return []
         except Exception as e:
             logger.error(f"Failed to get request logs by model: {e}")
-            raise
-        finally:
-            session.close()
+            return []
     
     def get_request_logs_by_ip(self, source_ip: str, limit: int = 100) -> List[RequestLog]:
         """
@@ -446,15 +471,14 @@ class RequestLogRepository:
             List[RequestLog]: List of request log objects
         """
         try:
-            session = self.db.get_session()
-            
-            request_logs = session.query(RequestLog).filter_by(source_ip=source_ip).order_by(RequestLog.timestamp_received.desc()).limit(limit).all()
-            return request_logs
+            with self.db.session_scope() as session:
+                return session.query(RequestLog).filter_by(source_ip=source_ip).order_by(RequestLog.timestamp_received.desc()).limit(limit).all()
+        except DatabaseUnavailable:
+            logger.warning("DB unavailable; get_request_logs_by_ip returns []")
+            return []
         except Exception as e:
             logger.error(f"Failed to get request logs by IP: {e}")
-            raise
-        finally:
-            session.close()
+            return []
 
 
 class AnalyticsRepository:

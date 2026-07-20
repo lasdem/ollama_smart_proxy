@@ -53,15 +53,9 @@ def _upsert_bundle(
     is_pg = cfg.get("DB_TYPE") == "postgres"
 
     def run(sql: str, params: dict) -> None:
-        session = db.get_session()
-        try:
+        with db.session_scope() as session:
             session.execute(text(sql), params)
             session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
 
     if is_pg:
         sql_hm = """
@@ -256,9 +250,8 @@ def delete_rollups_older_than(db, hourly_cutoff: datetime, daily_cutoff: datetim
     """Delete rollup rows with bucket timestamps before cutoffs."""
     if not _rollup_tables_present(db.engine):
         return {}
-    session = db.get_session()
     counts: Dict[str, int] = {}
-    try:
+    with db.session_scope() as session:
         for label, table, col in [
             ("hourly_model", "analytics_hourly_by_model", "bucket_hour"),
             ("hourly_ip", "analytics_hourly_by_ip", "bucket_hour"),
@@ -269,33 +262,21 @@ def delete_rollups_older_than(db, hourly_cutoff: datetime, daily_cutoff: datetim
             r = session.execute(text(f"DELETE FROM {table} WHERE {col} < :c"), {"c": cutoff})
             counts[label] = r.rowcount if r.rowcount is not None else 0
         session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
     return counts
 
 
 def purge_all_request_logs(db) -> int:
-    session = db.get_session()
-    try:
+    with db.session_scope() as session:
         r = session.execute(text("DELETE FROM request_logs"))
         session.commit()
         return r.rowcount or 0
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def purge_all_rollups(db) -> int:
     if not _rollup_tables_present(db.engine):
         return 0
-    session = db.get_session()
     total = 0
-    try:
+    with db.session_scope() as session:
         for table in (
             "analytics_hourly_by_model",
             "analytics_hourly_by_ip",
@@ -306,8 +287,3 @@ def purge_all_rollups(db) -> int:
             total += r.rowcount or 0
         session.commit()
         return total
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()

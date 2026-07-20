@@ -7,6 +7,7 @@ import os
 import logging
 import json
 import fcntl
+from contextlib import contextmanager
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,13 @@ FALLBACK_LOG_MAX_SIZE = int(os.getenv("FALLBACK_LOG_MAX_SIZE", "10485760"))  # 1
 
 # Base model
 Base = declarative_base()
+
+
+class DatabaseUnavailable(Exception):
+    """Raised by session_scope() when the database is unavailable (real outage or simulated).
+
+    Callers on the write path treat this as a signal to fall back to file logging; read
+    paths treat it as a signal to degrade gracefully (return safe empty results)."""
 
 
 class RequestLog(Base):
@@ -328,6 +336,36 @@ class DatabaseConnection:
         if self._simulated_unavailable:
             raise Exception("Database is simulated as unavailable for testing")
         return self.SessionLocal()
+
+    @contextmanager
+    def session_scope(self):
+        """Yield a database session with guaranteed-safe teardown.
+
+        - Raises ``DatabaseUnavailable`` (before yielding) when the DB is unavailable,
+          so callers never end up referencing an unbound ``session`` in except/finally.
+        - On an error inside the ``with`` block, rolls back then re-raises.
+        - Always closes the session; both rollback and close are wrapped so teardown
+          itself can never raise.
+
+        Backend-agnostic: keys off ``is_available()`` only, so behaves identically for
+        SQLite and PostgreSQL.
+        """
+        if not self.is_available():
+            raise DatabaseUnavailable("Database is unavailable")
+        session = self.SessionLocal()
+        try:
+            yield session
+        except Exception:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
     
     def close(self):
         """Close database connection"""
@@ -585,6 +623,7 @@ class AnalyticsQueryBuilder:
         Returns:
             List[Dict]: Error rate stats
         """
+        session = None
         try:
             session = self.db.get_session()
             if group_by == 'model_name':
@@ -631,9 +670,13 @@ class AnalyticsQueryBuilder:
             ]
         except Exception as e:
             logger.error(f"Failed to get error rate analysis: {e}")
-            raise
+            return []
         finally:
-            session.close()
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def get_request_count_by_model(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
         """
@@ -644,6 +687,7 @@ class AnalyticsQueryBuilder:
         Returns:
             List[Dict]: List of model statistics
         """
+        session = None
         try:
             session = self.db.get_session()
 
@@ -673,9 +717,13 @@ class AnalyticsQueryBuilder:
             ]
         except Exception as e:
             logger.error(f"Failed to get request count by model: {e}")
-            raise
+            return []
         finally:
-            session.close()
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def get_performance_stats(self, start_time: datetime, end_time: datetime, group_by: str = 'model_name') -> List[Dict[str, Any]]:
         """
@@ -689,6 +737,7 @@ class AnalyticsQueryBuilder:
         Returns:
             List[Dict]: List of performance statistics
         """
+        session = None
         try:
             session = self.db.get_session()
             
@@ -726,9 +775,13 @@ class AnalyticsQueryBuilder:
             ]
         except Exception as e:
             logger.error(f"Failed to get performance stats: {e}")
-            raise
+            return []
         finally:
-            session.close()
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
 
     def get_request_count_by_ip(self, start_time: datetime, end_time: datetime, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -742,6 +795,7 @@ class AnalyticsQueryBuilder:
         Returns:
             List[Dict]: List of IP statistics
         """
+        session = None
         try:
             session = self.db.get_session()
             
@@ -769,9 +823,13 @@ class AnalyticsQueryBuilder:
             ]
         except Exception as e:
             logger.error(f"Failed to get request count by IP: {e}")
-            raise
+            return []
         finally:
-            session.close()
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
     
     def get_token_usage_stats(self, start_time: datetime, end_time: datetime) -> Dict[str, Any]:
         """
@@ -801,6 +859,8 @@ class AnalyticsQueryBuilder:
         """Aggregate precomputed hourly rollups over [start_time, end_time]."""
         from rollup_ops import floor_hour_utc, _rollup_tables_present  # noqa: WPS433
 
+        if not self.db.is_available():
+            return None
         if not _rollup_tables_present(self.db.engine):
             return None
 
@@ -959,6 +1019,8 @@ class AnalyticsQueryBuilder:
         """Time series from hourly (7d) or daily (90d) rollups."""
         from rollup_ops import floor_hour_utc, floor_day_utc, _rollup_tables_present  # noqa: WPS433
 
+        if not self.db.is_available():
+            return None
         if not _rollup_tables_present(self.db.engine):
             return None
 

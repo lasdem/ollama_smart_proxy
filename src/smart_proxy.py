@@ -982,8 +982,9 @@ async def log_retention_task():
         try:
             cutoff = datetime.utcnow() - timedelta(days=LOG_RETENTION_DAYS)
             db = get_db()
-            session = db.get_session()
-            try:
+            if not db.is_available():
+                continue
+            with db.session_scope() as session:
                 deleted = session.query(RequestLog).filter(
                     RequestLog.created_at < cutoff
                 ).delete(synchronize_session=False)
@@ -991,8 +992,6 @@ async def log_retention_task():
                 if deleted > 0:
                     logger.info(f"Log retention: deleted {deleted} records older than {LOG_RETENTION_DAYS} days",
                                 extra={"event": "log_retention"})
-            finally:
-                session.close()
         except Exception as e:
             logger.error(f"Log retention task error: {e}", extra={"event": "log_retention_error"})
 

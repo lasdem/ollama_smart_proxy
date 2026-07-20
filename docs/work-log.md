@@ -12,6 +12,16 @@ Each entry should include:
 
 ---
 
+## 2026-07-20
+
+### v4.16 DB outage resilience (DB-independent)
+- **Topic**: Client received `500 Internal Server Error` on proxied requests when the DB was unavailable ("Simulate DB Down"), despite the proxy being designed to fall back to file logging.
+- **Summary**: Root cause was an `UnboundLocalError`, not the DB backend. `DatabaseConnection.get_session()` raises immediately when unavailable (real outage or the simulate flag); callers that assigned `session` inside the `try` then referenced it in `except`/`finally`, so the handler threw `UnboundLocalError` and masked the fallback, propagating as a 500. The client path uses `log_request`/`update_request_log`, which lacked the `session = None` guard that `create_request_log` already had — so `test_fallback_logging.py` (which only exercised `create_request_log`) passed while the real path failed. Fix is centralized and backend-agnostic (keys off `is_available()`): added `DatabaseUnavailable` + a `session_scope()` context manager with guaranteed-safe teardown in `database.py`; made the three write methods early-out to fallback and never propagate; made read getters, `AnalyticsQueryBuilder` methods, and the dashboard endpoints (`query_db`, `conversation_sessions`, `conversation_thread`) degrade gracefully (empty payloads / 503) instead of 500; applied `session_scope` to `rollup_ops` and the log-retention task.
+- **Key Findings**: The simulate flag is DB-type-independent (short-circuits `get_session()` before `SessionLocal()`), so this was never caused by switching to Postgres. A genuine outage is actually handled more gracefully because `get_session()` returns a lazy Session and the error surfaces later at query time (where `session` is bound). Added `tests/test_db_resilience.py` covering the real `log_request` NEW/UPDATE fallback, graceful read/analytics degradation, and post-restore recovery. `test_queue.py` is a live-network integration test (spawns the proxy + hits remote Ollama) and is not runnable offline.
+- **Related Files**: `src/database.py`, `src/data_access.py`, `src/proxy_endpoints.py`, `src/rollup_ops.py`, `src/smart_proxy.py`, `tests/test_db_resilience.py`, `docs/changelog/v4.16_DB_OUTAGE_RESILIENCE.md`, `docs/TODO.md`
+
+---
+
 ## 2026-07-08
 
 ### v4.15 Conversation view re-engineering
