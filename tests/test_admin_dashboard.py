@@ -346,6 +346,62 @@ class TestMonitoringEndpoints:
         )
         assert resp2.status_code == 404, resp2.text
 
+    def test_embeddings_excluded_from_conversations(self):
+        """Embedding requests (endpoint in api/embed, api/embeddings, v1/embeddings) are logged to
+        Request History but must not appear in conversation_sessions, and their (historical, shared)
+        conversation_key must 404 from conversation_thread. A legacy chat row (endpoint IS NULL) still
+        appears, proving the exclusion filter is NULL-safe."""
+        from data_access import init_repositories, get_request_log_repo
+        init_repositories()
+        repo = get_request_log_repo()
+        ip = "203.0.113.91"  # isolated test IP
+        embed_ck = "hk:203.0.113.91:bge-m3:deadbeefdeadbeef"
+        chat_ck = "hk:203.0.113.91:gpt-4:cafecafecafecafe"
+
+        # Embedding row: shares one head-key bucket, endpoint marks it as an embedding.
+        repo.log_request(
+            "emb-1", ip, "bge-m3:latest", "completed", 0.1, 100,
+            prompt_text="embed this", response_text="[Embeddings response]",
+            session_id="emb-s1", conversation_key=embed_ck, endpoint="api/embed",
+        )
+        # Legacy chat row: endpoint is NULL (older data) but must still be visible.
+        repo.log_request(
+            "chat-legacy-1", ip, "gpt-4", "completed", 1.0, 5,
+            prompt_text="hello", response_text="hi",
+            session_id="chat-s1", conversation_key=chat_ck,
+        )
+
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_sessions",
+            headers=headers,
+            params={"limit": 50, "offset": 0, "ip_address": ip},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200, resp.text
+        keys = {s["conversation_key"] for s in resp.json()["sessions"]}
+        assert embed_ck not in keys, "embedding conversation should be excluded"
+        assert chat_ck in keys, "legacy chat conversation (endpoint NULL) should be included"
+
+        # The embedding bucket is not loadable as a thread.
+        resp_embed = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
+            headers=headers,
+            params={"conversation_key": embed_ck},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp_embed.status_code == 404, resp_embed.text
+
+        # The legacy chat conversation still loads.
+        resp_chat = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
+            headers=headers,
+            params={"conversation_key": chat_ck},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp_chat.status_code == 200, resp_chat.text
+        assert resp_chat.json()["conversation_key"] == chat_ck
+
     def test_query_db_offset_returns_metadata(self):
         """query_db honors offset and returns total_count for pagination UI."""
         headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}

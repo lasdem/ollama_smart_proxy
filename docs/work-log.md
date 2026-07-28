@@ -12,6 +12,16 @@ Each entry should include:
 
 ---
 
+## 2026-07-28
+
+### v4.17 Exclude embeddings from the Conversations view
+- **Topic**: Conversations tab — embedding requests were aggregating into a single bogus conversation (observed `qwen3-embedding:8b-fp16 · 0 msg · 5985 turns`), with a performance concern when opening it.
+- **Summary**: Root cause is in `compute_conversation_key`: embedding requests carry an `input` field, not chat `messages`, and embedding clients send no conversation-id header, so both the system prompt and first user message are empty. The head-key hash `sha16(system + first user)` is therefore a constant, and every embedding call from the same IP+model produced the identical `hk:{ip}:{model}:{const}` key — collapsing them all into one bucket. Opening that "conversation" made `conversation_thread` load thousands of full (untruncated) request bodies to render a single meaningless segment. Fix: (1) `enqueue_request` now short-circuits for embedding endpoints via a new `_is_embedding_path()`/`EMBEDDING_ENDPOINTS` helper, setting `conversation_key`/`message_count`/`conversation_id` to `None`; (2) `conversation_sessions` and `conversation_thread` exclude embedding endpoints with a NULL-safe `endpoint` filter (`endpoint IS NULL OR lower(trim(endpoint)) NOT IN (...)`), which also hides the ~6000 historical rows and makes an embedding key 404. Embeddings remain in Request History + analytics unchanged (their `input` is stored in both `prompt_text` and raw `request_body`).
+- **Key Findings**: The endpoint-based filter (not the key skip) is the load-bearing part because historical embedding rows already carry the constant head-key; the key skip is forward-looking cleanliness. The filter must be NULL-safe or legacy rows (written before the `endpoint` column existed) would be wrongly dropped, since `NULL NOT IN (...)` is `NULL` in SQL. `proxy_endpoints` keeps a local copy of `EMBEDDING_ENDPOINTS` to avoid a circular import from `smart_proxy`. No DB migration needed.
+- **Related Files**: `src/smart_proxy.py`, `src/proxy_endpoints.py`, `tests/test_conversation_grouping.py`, `tests/test_admin_dashboard.py`, `docs/changelog/v4.17_EXCLUDE_EMBEDDINGS_FROM_CONVERSATIONS.md`, `docs/TODO.md`
+
+---
+
 ## 2026-07-20
 
 ### v4.16 DB outage resilience (DB-independent)

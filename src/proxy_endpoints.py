@@ -24,6 +24,19 @@ logger = logging.getLogger(__name__)
 _analytics_cache: dict = {}
 ANALYTICS_CACHE_TTL = int(os.getenv("ANALYTICS_CACHE_TTL", "60"))  # seconds
 
+# Embedding endpoints are logged to Request History + analytics but excluded from the Conversations
+# view (they carry `input`, not chat messages, so they are not conversations). Kept local to avoid a
+# circular import from smart_proxy; must stay in sync with smart_proxy.EMBEDDING_ENDPOINTS.
+EMBEDDING_ENDPOINTS = ("api/embed", "api/embeddings", "v1/embeddings")
+
+
+def _exclude_embeddings_filter():
+    """NULL-safe filter that keeps non-embedding rows (and legacy rows with endpoint IS NULL)."""
+    return or_(
+        RequestLog.endpoint.is_(None),
+        func.lower(func.trim(RequestLog.endpoint)).notin_(EMBEDDING_ENDPOINTS),
+    )
+
 
 def _analytics_parallel_enabled() -> bool:
     """Read at request time so .env (loaded after imports) is respected."""
@@ -529,6 +542,8 @@ async def conversation_sessions(
             func.min(RequestLog.id).label("first_id"),
         )
         # Filter matching rows before grouping (mirrors query_db semantics).
+        # Embeddings are excluded from the Conversations view (still visible in Request History).
+        base = base.filter(_exclude_embeddings_filter())
         if model:
             pattern = model.replace("*", "%") if "*" in model else f"{model}%"
             base = base.filter(RequestLog.model_name.like(pattern))
@@ -677,7 +692,8 @@ async def conversation_thread(request: Request, conversation_key: str):
         sess = db.get_session()
         ck_blank = or_(RequestLog.conversation_key.is_(None), func.trim(RequestLog.conversation_key) == "")
         sid_blank = or_(RequestLog.session_id.is_(None), func.trim(RequestLog.session_id) == "")
-        query = sess.query(RequestLog)
+        # Embeddings are not conversations; loading their (historical) bucket returns 404.
+        query = sess.query(RequestLog).filter(_exclude_embeddings_filter())
         if conversation_key.strip() == "no-session":
             query = query.filter(and_(ck_blank, sid_blank))
         else:

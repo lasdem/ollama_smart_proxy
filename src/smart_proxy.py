@@ -128,6 +128,16 @@ def compute_conversation_key(client_ip: str, model_name: str, system_message: Op
     return f"hk:{client_ip}:{model_name}:{digest}"
 
 
+# Endpoints that carry embeddings (input, not chat messages). They are logged to Request History
+# and analytics, but must be kept out of the Conversations view (they are not conversations).
+EMBEDDING_ENDPOINTS = frozenset({"api/embed", "api/embeddings", "v1/embeddings"})
+
+
+def _is_embedding_path(path: str) -> bool:
+    """True for the embedding endpoints (with or without a leading slash, case-insensitive)."""
+    return (path or "").strip().strip("/").lower() in EMBEDDING_ENDPOINTS
+
+
 def _extract_text_from_content(content) -> str:
     """Extract displayable text from a message content field.
     Handles both plain strings and OpenAI multimodal content arrays."""
@@ -463,14 +473,21 @@ async def enqueue_request(request: Request, path: str):
 
     # Conversation identity for the Conversations view: prefer a client-provided conversation-id header,
     # else a head-key derived from the system prompt + first user message (stable across tool-result reformatting).
-    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-    message_count = len(messages) if messages else None
-    conversation_id = _detect_conversation_id(request.headers)
-    try:
-        conversation_key = compute_conversation_key(client_ip, model_name, system_message, messages, conversation_id)
-    except Exception as e:
-        logger.debug("conversation_key computation failed: %s", e)
+    # Embeddings are not conversations (no messages), so they get no grouping key and are excluded from that view.
+    if _is_embedding_path(path):
+        messages = []
+        message_count = None
+        conversation_id = None
         conversation_key = None
+    else:
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        message_count = len(messages) if messages else None
+        conversation_id = _detect_conversation_id(request.headers)
+        try:
+            conversation_key = compute_conversation_key(client_ip, model_name, system_message, messages, conversation_id)
+        except Exception as e:
+            logger.debug("conversation_key computation failed: %s", e)
+            conversation_key = None
 
     queued_req.session_id = session_id
     queued_req.conversation_key = conversation_key

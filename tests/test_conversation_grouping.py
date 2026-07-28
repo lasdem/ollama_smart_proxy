@@ -14,9 +14,25 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from smart_proxy import compute_conversation_key, _detect_conversation_id
+from smart_proxy import compute_conversation_key, _detect_conversation_id, _is_embedding_path
 from proxy_endpoints import select_conversation_segments
 from live_broadcaster import LiveBroadcaster
+
+
+class TestIsEmbeddingPath:
+    """Embedding endpoints are detected (so they can be excluded from the Conversations view)."""
+
+    @pytest.mark.parametrize("path", ["api/embed", "api/embeddings", "v1/embeddings"])
+    def test_detects_embedding_paths(self, path):
+        assert _is_embedding_path(path) is True
+
+    @pytest.mark.parametrize("path", ["/api/embed", "/v1/embeddings/", "API/Embed"])
+    def test_tolerates_slashes_and_case(self, path):
+        assert _is_embedding_path(path) is True
+
+    @pytest.mark.parametrize("path", ["api/chat", "v1/chat/completions", "api/generate", "", None])
+    def test_rejects_non_embedding_paths(self, path):
+        assert _is_embedding_path(path) is False
 
 
 class TestDetectConversationId:
