@@ -12,6 +12,16 @@ Each entry should include:
 
 ---
 
+## 2026-08-28
+
+### Model usage audit for disk cleanup (`scripts/model_usage_audit.py`)
+- **Topic**: Operational question on the `gpuserver1` deployment — which installed models are almost never used, so they can be removed. No direct DB access available; admin key only.
+- **Summary**: Added `scripts/model_usage_audit.py`, which joins `/api/tags` (installed models + on-disk size) against per-model usage and emits a tiered cleanup list with `ollama rm` lines. Usage counts come from `/proxy/analytics/histogram?view=daily` (`analytics_daily_by_model`, ~91-day retention); `/proxy/query_db` is used only to read `prompt_text`/`ip_address` within the 7-day raw-log window in order to separate warm-up sweep traffic from real requests. Result on the live deployment: of 42 installed models / 641 GB, 16 models (227.6 GB) have zero genuine requests in the 58-day data window, 7 models (60.2 GB) have 2–5, and 19 carry real traffic.
+- **Key Findings**: (1) `/proxy/analytics?hours=N` is the wrong source for long windows — `get_request_count_by_model` queries `request_logs`, pruned after `LOG_RETENTION_DAYS` (7 days here), and the endpoint silently falls back to that raw SQL when `build_home_analytics_from_rollups` returns `None`, so `hours=720` and `hours=2160` both returned 1,395. Using it alone would have flagged `qwen3-embedding:8b-fp16` (8,094 requests) and `qwen2.5vl` (3,343) as unused, since their volume predates the log window. (2) The daily rollups are correct, not inflated — they match the hourly rollups exactly on 72 of 73 overlapping model-days; the lone mismatch (`llama3.3:latest`, 21 Aug) is the boundary day truncated by the 8-day hourly retention. (3) Most apparent usage on rare models is a sweep: 33 of 35 requests to the low-count models came from one host via `curl` with an empty `prompt_text`, enumerating nearly every tag on 26–27 Aug. An empty prompt on a generate/chat endpoint is a reliable probe marker; verified `prompt_text` is populated for real chat traffic (`ornith-1.5:35b` 422/426, `llama3.3:latest` 671/704). (4) `:latest` and letter-case aliases must be merged or heavily-used models look idle — `qwen2.5vl` + `qwen2.5vl:latest` = 3,345 requests, `llama3.3` + `llama3.3:latest` = 2,865. Probe-vs-organic is only decidable inside the 7-day window, so five low-volume "keep" models are flagged unverified rather than asserted in use.
+- **Related Files**: `scripts/model_usage_audit.py`, `.cursor/logs/2026/08/28/conversation-12-00-model-usage-cleanup-audit.md`, `docs/work-log.md` (read-only: `src/proxy_endpoints.py`, `src/database.py`, `src/data_access.py`, `src/utils.py`)
+
+---
+
 ## 2026-07-28
 
 ### v4.17 Exclude embeddings from the Conversations view
