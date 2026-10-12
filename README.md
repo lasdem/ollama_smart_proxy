@@ -114,6 +114,29 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 - `POST /api/chat` - Ollama chat format
 - `POST /api/generate` - Ollama generation format
 
+### Decision Models (Jev-style)
+
+- `POST /v1/systemone` - [Jev-style decision models](https://ollama.com/blog/ollama-now-supports-jev-style-decision-models) (Ollama ≥ 0.35: `nimble`, `tev1`, `tev1:0.8b`). Send `state` plus named `questions` of type `choice` / `noul` / `score` and get every answer, with probabilities, in one JSON document.
+
+Queued and logged like chat traffic — the scheduler decides when the decision model is loaded, and usage rolls up into analytics. Request History stores the flattened `state` + question inventory as the prompt and a compact answer summary as the response (e.g. `team=billing (p=0.985) · refund=noul 0.997 · urgency=0.815`); the reply itself is forwarded byte-for-byte. Decision calls carry no `messages`, so they are kept out of the Conversations view (they do appear in Request History).
+
+```bash
+curl -X POST http://localhost:8003/v1/systemone -d '{
+  "model": "nimble",
+  "state": {"ticket": "I was charged twice. Please refund the extra payment."},
+  "questions": {
+    "team": {"type": "choice", "instructions": "Which team should handle this ticket?",
+             "criteria": {"billing": "Payments and refunds", "technical": "Bugs and integrations",
+                          "other": "None of the above"}},
+    "refund": {"type": "noul", "instructions": "Does the customer explicitly ask for a refund?"},
+    "urgency": {"type": "score", "instructions": "How urgent is this ticket?",
+                "criteria": ["Routine", "Soon", "Urgent"]}
+  }
+}'
+```
+
+TypeSafe's SDK works through the proxy too — point it at the proxy instead of Ollama: `export TYPESAFE_BASE_URL=http://localhost:8003 TYPESAFE_API_KEY=ollama TYPESAFE_DEFAULT_MODEL=nimble`.
+
 ### Monitoring (Public)
 
 - `GET /proxy/health` - System health + queue stats

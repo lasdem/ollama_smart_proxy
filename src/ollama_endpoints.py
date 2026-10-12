@@ -67,6 +67,15 @@ async def handle_openai_embeddings(request: Request):
     return await _enqueue_request_func(request, "v1/embeddings")
 
 
+# --- Decision-Model Route (Jev-style /v1/systemone, Ollama >= 0.35) ---
+@router.post("/v1/systemone")
+async def handle_systemone_decision(request: Request):
+    """Jev-style decision models (nimble, tev1, ...): `state` + `questions` in, one JSON
+    document of answers out. Queued like chat so the VRAM-aware scheduler decides when the
+    decision model is loaded, and logged so decision traffic shows up in analytics."""
+    return await _enqueue_request_func(request, "v1/systemone")
+
+
 # --- Protected Admin Routes ---
 @router.api_route("/api/pull", methods=["POST"])
 @router.api_route("/api/push", methods=["POST"])

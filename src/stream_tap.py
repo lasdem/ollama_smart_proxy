@@ -16,6 +16,73 @@ ExtractResult = Optional[Tuple[str, str]]
 # One NDJSON line may yield multiple parts (e.g. same chunk with both thinking and content deltas).
 Part = Tuple[str, str]
 
+# --- Jev-style decision models (POST /v1/systemone, Ollama >= 0.35) -------------
+# Unlike chat/generate this endpoint answers with ONE JSON document (not an NDJSON
+# stream): {"model": ..., "answers": {...}, "usage": {"input_tokens", "output_tokens"}}.
+DECISION_PATHS = ("v1/systemone",)
+DECISION_ANSWER_SEP = " · "
+# Cap for the raw body we retain to re-parse a pretty-printed single JSON document.
+DECISION_RAW_SAMPLE_LIMIT = 1_000_000
+
+
+def is_decision_path(path: str) -> bool:
+    """True for the decision endpoint (with or without leading slash, case-insensitive)."""
+    p = (path or "").strip("/").lower()
+    return any(p == d or p.startswith(d + "/") for d in DECISION_PATHS)
+
+
+def _fmt_number(value) -> Optional[str]:
+    """0.985 -> '0.985'; None for anything that isn't a real number (bools excluded)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return f"{float(value):.3g}"
+
+
+def _clip(value, limit: int = 160) -> str:
+    """Single-line, length-capped rendering of an arbitrary JSON value."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _render_decision_answer(name: str, answer) -> str:
+    """Render one named answer as ``name=<verdict> (<detail>)``.
+
+    choice -> ``team=billing (p=0.985)``, noul -> ``refund=noul 0.997``,
+    score -> ``urgency=0.815``. Unknown shapes fall back to clipped raw JSON so
+    a new answer type is never silently dropped from the logs.
+    """
+    if not isinstance(answer, dict):
+        return f"{name}={_clip(answer)}"
+
+    atype = answer.get("type")
+    if atype == "choice":
+        choice = answer.get("choice")
+        probs = answer.get("probabilities")
+        prob = probs.get(choice) if isinstance(probs, dict) else None
+        prob = _fmt_number(prob) or _fmt_number(answer.get("confidence"))
+        return f"{name}={_clip(choice, 60)}" + (f" (p={prob})" if prob else "")
+    if atype == "noul":
+        prob = _fmt_number(answer.get("noul"))
+        return f"{name}=noul {prob}" if prob else f"{name}=noul ?"
+    if atype == "score":
+        score = _fmt_number(answer.get("score"))
+        return f"{name}={score}" if score else f"{name}=score ?"
+    return f"{name}={_clip(answer)}"
+
+
+def render_decision_answers(data) -> Optional[str]:
+    """Compact one-line summary of a /v1/systemone response, or None if it has no answers.
+
+    Example: ``team=billing (p=0.985) · refund=noul 0.997 · urgency=0.815``
+    """
+    answers = data.get("answers") if isinstance(data, dict) else None
+    if not isinstance(answers, dict) or not answers:
+        return None
+    return DECISION_ANSWER_SEP.join(
+        _render_decision_answer(str(name), answer) for name, answer in answers.items()
+    )
+
 
 class StreamMetadata:
     """Accumulates non-text metadata extracted from a response stream."""
@@ -80,11 +147,17 @@ def extract_parts_from_ndjson(line: bytes, path: str) -> list[Part]:
         data = json.loads(line.decode("utf-8", errors="replace"))
     except Exception:
         return []
+    if not isinstance(data, dict):
+        return []
     path_lower = path.strip("/").lower()
 
     error_msg = data.get("error")
     if isinstance(error_msg, str) and error_msg:
         return [("content", f"[Error] {error_msg}")]
+
+    if is_decision_path(path_lower):
+        summary = render_decision_answers(data)
+        return [("content", summary)] if summary else []
 
     if "api/chat" in path_lower:
         msg = data.get("message")
@@ -155,7 +228,21 @@ def extract_metadata_from_ndjson(line: bytes, path: str, meta: StreamMetadata) -
         data = json.loads(line.decode("utf-8", errors="replace"))
     except Exception:
         return
+    if not isinstance(data, dict):
+        return
     path_lower = path.strip("/").lower()
+
+    if is_decision_path(path_lower):
+        # Jev-style decisions report usage as input_tokens/output_tokens.
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            in_tokens = usage.get("input_tokens")
+            if isinstance(in_tokens, int) and not isinstance(in_tokens, bool):
+                meta.prompt_eval_count = in_tokens
+            out_tokens = usage.get("output_tokens")
+            if isinstance(out_tokens, int) and not isinstance(out_tokens, bool):
+                meta.eval_count = out_tokens
+        return
 
     if "api/chat" in path_lower:
         msg = data.get("message")
@@ -279,6 +366,25 @@ async def tee_stream(
             process_result(part)
         extract_metadata_from_ndjson(line_bytes, path, meta)
 
+    # /v1/systemone replies with a single JSON document. If a server pretty-prints it across
+    # lines, every line-by-line parse fails, so keep a bounded copy and retry as one document.
+    decision_mode = is_decision_path(path)
+    decision_raw: list[bytes] = []
+    decision_raw_size = 0
+
+    def _finalize_decision() -> None:
+        if not decision_mode or accumulated_content or not decision_raw:
+            return
+        blob = b"".join(decision_raw).strip()
+        if not blob:
+            return
+        parts = extract_parts_from_ndjson(blob, path)
+        if not parts:
+            return
+        for part in parts:
+            process_result(part)
+        extract_metadata_from_ndjson(blob, path, meta)
+
     try:
         ait = raw_iter.__aiter__()
         while True:
@@ -291,6 +397,9 @@ async def tee_stream(
                 break
             yield chunk
             buffer += chunk
+            if decision_mode and decision_raw_size < DECISION_RAW_SAMPLE_LIMIT:
+                decision_raw.append(chunk)
+                decision_raw_size += len(chunk)
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
                 line = line.strip()
@@ -304,6 +413,11 @@ async def tee_stream(
         if buffer.strip():
             _process_line(buffer)
     finally:
+        if decision_mode:
+            try:
+                _finalize_decision()
+            except Exception as e:
+                logger.warning("stream_tap decision fallback failed: %s", e)
         full_content = "".join(accumulated_content)
         full_thinking = "".join(accumulated_thinking)
         if on_done:

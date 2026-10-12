@@ -138,6 +138,94 @@ def _is_embedding_path(path: str) -> bool:
     return (path or "").strip().strip("/").lower() in EMBEDDING_ENDPOINTS
 
 
+# Jev-style decision models (Ollama >= 0.35): POST /v1/systemone carries `state` (the text to
+# reason about) plus named `questions` of type choice|noul|score, and answers them all in one
+# JSON document. Queued + logged like chat (decision models still cost VRAM), but there are no
+# `messages`, so it must stay out of the Conversations view for the same reason as embeddings.
+DECISION_ENDPOINTS = frozenset({"v1/systemone"})
+
+# Endpoints that carry no chat messages and therefore must not get a conversation_key.
+NON_CONVERSATION_ENDPOINTS = EMBEDDING_ENDPOINTS | DECISION_ENDPOINTS
+
+
+def _is_decision_path(path: str) -> bool:
+    """True for the Jev-style decision endpoint (with or without a leading slash)."""
+    return (path or "").strip().strip("/").lower() in DECISION_ENDPOINTS
+
+
+def _is_non_conversation_path(path: str) -> bool:
+    """True for endpoints that are logged but never grouped as conversations."""
+    return (path or "").strip().strip("/").lower() in NON_CONVERSATION_ENDPOINTS
+
+
+# Cap on how much of one `state` value lands in prompt_text (the full body is stored separately).
+DECISION_STATE_VALUE_LIMIT = int(os.getenv("DECISION_STATE_VALUE_LIMIT", "500"))
+# Cap on how many questions are listed in prompt_text (the full list is in request_body).
+DECISION_QUESTION_PREVIEW_LIMIT = int(os.getenv("DECISION_QUESTION_PREVIEW_LIMIT", "12"))
+
+
+def _decision_state_text(state) -> str:
+    """Flatten the `state` object into readable lines: ``ticket: I was charged twice.``"""
+    if isinstance(state, str):
+        return state.strip()
+    if isinstance(state, dict):
+        lines = []
+        for key, value in state.items():
+            if isinstance(value, str):
+                text = value.strip()
+            else:
+                text = " ".join(json.dumps(value, ensure_ascii=False, default=str).split())
+            if len(text) > DECISION_STATE_VALUE_LIMIT:
+                text = text[:DECISION_STATE_VALUE_LIMIT] + "…"
+            lines.append(f"{key}: {text}")
+        return "\n".join(lines)
+    return "" if state is None else str(state)
+
+
+def _decision_questions_text(questions) -> str:
+    """One-line inventory of the asked questions: ``[questions: team (choice: a|b), ok (noul)]``.
+
+    Bounded on both axes: at most DECISION_QUESTION_PREVIEW_LIMIT questions, each listing at
+    most 8 criteria — everything else stays in the (stored) raw request body.
+    """
+    if not isinstance(questions, dict) or not questions:
+        return ""
+    items = []
+    previewed = list(questions.items())[:DECISION_QUESTION_PREVIEW_LIMIT]
+    for name, spec in previewed:
+        qtype = spec.get("type") if isinstance(spec, dict) else None
+        criteria = spec.get("criteria") if isinstance(spec, dict) else None
+        if isinstance(criteria, dict):
+            keys = list(criteria.keys())
+        elif isinstance(criteria, list):
+            keys = criteria
+        else:
+            keys = []
+        criteria_shown = [str(k)[:24] for k in keys[:8]]
+        hidden_criteria = len(keys) - len(criteria_shown)
+        if hidden_criteria > 0:
+            criteria_shown.append(f"+{hidden_criteria} more")
+        suffix = str(qtype) if qtype else "question"
+        detail = f": {'|'.join(criteria_shown)}" if criteria_shown else ""
+        items.append(f"{name} ({suffix}{detail})")
+    hidden_questions = len(questions) - len(previewed)
+    if hidden_questions > 0:
+        items.append(f"+{hidden_questions} more")
+    return "[questions: " + ", ".join(items) + "]"
+
+
+def format_decision_prompt(body: dict) -> str:
+    """prompt_text for a /v1/systemone request: the flattened state, then the question inventory.
+    Returns '' when the body carries neither, so callers keep their own fallback."""
+    if not isinstance(body, dict):
+        return ""
+    state_text = _decision_state_text(body.get("state"))
+    questions_text = _decision_questions_text(body.get("questions"))
+    if state_text and questions_text:
+        return f"{state_text}\n{questions_text}"
+    return state_text or questions_text
+
+
 def _extract_text_from_content(content) -> str:
     """Extract displayable text from a message content field.
     Handles both plain strings and OpenAI multimodal content arrays."""
@@ -455,6 +543,9 @@ async def enqueue_request(request: Request, path: str):
     elif "input" in body:
         inp = body["input"]
         prompt_text = json.dumps(inp) if isinstance(inp, list) else str(inp)
+    elif "state" in body or "questions" in body:
+        # Jev-style decision request (/v1/systemone): `state` is the text, `questions` the asks.
+        prompt_text = format_decision_prompt(body) or prompt_text
     # Extract available tool names from the request body
     raw_tools = body.get("tools")
     if isinstance(raw_tools, list) and raw_tools:
@@ -473,8 +564,9 @@ async def enqueue_request(request: Request, path: str):
 
     # Conversation identity for the Conversations view: prefer a client-provided conversation-id header,
     # else a head-key derived from the system prompt + first user message (stable across tool-result reformatting).
-    # Embeddings are not conversations (no messages), so they get no grouping key and are excluded from that view.
-    if _is_embedding_path(path):
+    # Embeddings and Jev-style decisions are not conversations (no messages), so they get no grouping
+    # key and are excluded from that view.
+    if _is_non_conversation_path(path):
         messages = []
         message_count = None
         conversation_id = None
@@ -709,6 +801,8 @@ async def process_request(request: QueuedRequest, priority_score: int):
                         prompt_preview = str(last_msg)[:500]
             elif request.body.get("prompt"):
                 prompt_preview = str(request.body["prompt"])[:500]
+            elif request.body.get("state") or request.body.get("questions"):
+                prompt_preview = format_decision_prompt(request.body)[:500]
             await broadcaster.request_started(
                 request.request_id,
                 metadata={
@@ -770,6 +864,9 @@ async def process_request(request: QueuedRequest, priority_score: int):
                         response_text_val = full_content if full_content else f"[HTTP {status_code}]"
                         if not full_content and "embed" in request.path.lower() and not is_error:
                             response_text_val = "[Embeddings response]"
+                        if not full_content and _is_decision_path(request.path) and not is_error:
+                            # Answers did not parse into a summary; the raw JSON is still stored.
+                            response_text_val = "[Decision response — see raw JSON]"
                         if not full_content and full_thinking:
                             response_text_val = "[Thinking only — see details]"
                         if not full_content and tc_json:

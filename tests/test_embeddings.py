@@ -94,10 +94,16 @@ def test_embedding_route_precedes_catch_all(embed_client):
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def temp_repo():
-    """Temporary SQLite DB with a fresh request repository."""
+    """Temporary SQLite DB with a fresh request repository.
+
+    DB env vars are restored on teardown: later modules (test_queue, test_streaming) spawn the
+    proxy as a subprocess and would otherwise inherit this temp database path.
+    """
     temp_dir = tempfile.mkdtemp()
     db_path = os.path.join(temp_dir, "test.db")
     fallback_dir = os.path.join(temp_dir, "fallback_logs")
+    _env_keys = ("DB_TYPE", "SQLITE_DB_PATH", "FALLBACK_LOG_DIR")
+    orig_env = {k: os.environ.get(k) for k in _env_keys}
     os.environ["DB_TYPE"] = "sqlite"
     os.environ["SQLITE_DB_PATH"] = db_path
     os.environ["FALLBACK_LOG_DIR"] = fallback_dir
@@ -111,6 +117,11 @@ def temp_repo():
     yield get_request_log_repo(), db
 
     close_db()
+    for key, value in orig_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
     import shutil
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)

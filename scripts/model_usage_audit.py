@@ -32,6 +32,10 @@ from datetime import date, datetime, timezone
 
 PAGE = 1000
 EMBEDDING_ENDPOINTS = ("api/embed", "api/embeddings", "v1/embeddings")
+# Jev-style decision models (Ollama >= 0.35) — machine traffic, but a real reason to keep a model.
+DECISION_ENDPOINTS = ("v1/systemone",)
+# Endpoints whose traffic is not a chat conversation (tracked separately from `organic`).
+NON_CONVERSATION_ENDPOINTS = EMBEDDING_ENDPOINTS + DECISION_ENDPOINTS
 
 
 def get(base, path, key, timeout=120):
@@ -64,7 +68,7 @@ def is_probe(row):
     endpoint is the reliable tell -- no human sends one.
     """
     ep = (row.get("endpoint") or "").strip().lower()
-    if ep in EMBEDDING_ENDPOINTS:
+    if ep in NON_CONVERSATION_ENDPOINTS:
         return False
     return not (row.get("prompt_text") or "").strip()
 
@@ -137,7 +141,7 @@ def main():
 
     # --- recent-window enrichment from raw logs ------------------------------
     recent = defaultdict(lambda: {
-        "requests": 0, "errors": 0, "embed": 0, "probe": 0, "organic": 0,
+        "requests": 0, "errors": 0, "embed": 0, "decision": 0, "probe": 0, "organic": 0,
         "ips": set(), "organic_ips": set(),
     })
     for r in logs:
@@ -150,6 +154,8 @@ def main():
             e["errors"] += 1
         if (r.get("endpoint") or "").strip().lower() in EMBEDDING_ENDPOINTS:
             e["embed"] += 1
+        if (r.get("endpoint") or "").strip().lower() in DECISION_ENDPOINTS:
+            e["decision"] += 1
         if r.get("ip_address"):
             e["ips"].add(r["ip_address"])
         if is_probe(r):
@@ -186,6 +192,7 @@ def main():
             "recent_requests_7d": rc["requests"] if rc else 0,
             "recent_distinct_ips": len(rc["ips"]) if rc else 0,
             "recent_embed_requests": rc["embed"] if rc else 0,
+            "recent_decision_requests": rc["decision"] if rc else 0,
             "recent_probe_7d": rc["probe"] if rc else 0,
             "recent_organic_7d": rc["organic"] if rc else 0,
             "recent_organic_ips": len(rc["organic_ips"]) if rc else 0,

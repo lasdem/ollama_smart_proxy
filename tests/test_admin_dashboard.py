@@ -346,6 +346,62 @@ class TestMonitoringEndpoints:
         )
         assert resp2.status_code == 404, resp2.text
 
+    def test_decisions_excluded_from_conversations(self):
+        """Jev-style decision requests (endpoint v1/systemone) carry `state`/`questions`, not messages:
+        they must be logged to Request History but stay out of conversation_sessions, and their shared
+        head-key bucket must 404 from conversation_thread (same failure mode as embeddings, v4.17)."""
+        from data_access import init_repositories, get_request_log_repo
+        init_repositories()
+        repo = get_request_log_repo()
+        ip = "203.0.113.92"  # isolated test IP
+        decision_ck = "hk:203.0.113.92:nimble:0000000000000000"  # what the empty head-key hashes to
+        chat_ck = "hk:203.0.113.92:nimble:ffffffffffffffff"
+
+        repo.log_request(
+            "dec-1", ip, "nimble", "completed", 0.09, 100,
+            prompt_text="ticket: I was charged twice.\n[questions: team (choice: billing|other)]",
+            response_text="team=billing (p=0.985)",
+            session_id="dec-s1", conversation_key=decision_ck, endpoint="v1/systemone",
+            prompt_eval_count=841, eval_count=4,
+        )
+        # Control row: same model/IP but a chat endpoint, so it must remain visible.
+        repo.log_request(
+            "dec-2", ip, "nimble", "completed", 0.5, 100,
+            prompt_text="hello", response_text="hi",
+            session_id="dec-s2", conversation_key=chat_ck, endpoint="v1/chat/completions",
+        )
+
+        headers = {"X-Admin-Key": TestConfig.ADMIN_KEY}
+        resp = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_sessions",
+            headers=headers,
+            params={"limit": 50, "offset": 0, "ip_address": ip},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp.status_code == 200, resp.text
+        keys = {s["conversation_key"] for s in resp.json()["sessions"]}
+        assert decision_ck not in keys, "decision request should be excluded from Conversations"
+        assert chat_ck in keys, "chat request on the same model should be included"
+
+        resp_decision = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/conversation_thread",
+            headers=headers,
+            params={"conversation_key": decision_ck},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp_decision.status_code == 404, resp_decision.text
+
+        # Still present in Request History (analytics/usage must not be lost).
+        resp_hist = requests.get(
+            f"{TestConfig.PROXY_URL}/proxy/query_db",
+            headers=headers,
+            params={"limit": 10, "offset": 0, "session_id": "dec-s1"},
+            timeout=TestConfig.TIMEOUT,
+        )
+        assert resp_hist.status_code == 200, resp_hist.text
+        rows = resp_hist.json().get("requests", [])
+        assert any(r["request_id"] == "dec-1" and r["endpoint"] == "v1/systemone" for r in rows), rows
+
     def test_embeddings_excluded_from_conversations(self):
         """Embedding requests (endpoint in api/embed, api/embeddings, v1/embeddings) are logged to
         Request History but must not appear in conversation_sessions, and their (historical, shared)
