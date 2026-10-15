@@ -26,9 +26,10 @@ WORKDIR /app
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 
-# Install sqlite3
+# Install sqlite3 and curl (required for healthcheck)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends sqlite3
+    apt-get install -y --no-install-recommends sqlite3 curl && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy application code
 COPY src/ ./src/
